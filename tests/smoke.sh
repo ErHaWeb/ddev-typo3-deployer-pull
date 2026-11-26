@@ -18,9 +18,39 @@ export XDG_CONFIG_HOME="$DDEV_XDG_CONFIG_HOME"
 export TEST_WORK="$work"
 export DDEV_NONINTERACTIVE=true
 
+# Keep human-readable progress on the original streams and collect detailed
+# command output per scenario. Successful assertions do not repeat log output.
+exec 3>&1 4>&2
+case_number=0
+case_name=''
+case_log=''
+
+pass_case() {
+    if [[ -n "$case_name" ]]; then
+        printf '     PASS: %s\n' "$case_name" >&3
+        case_name=''
+    fi
+}
+
+begin_case() {
+    pass_case
+    case_number=$((case_number + 1))
+    case_name=$1
+    case_log="$work/case-$case_number.log"
+    printf '\n[%02d] %s\n' "$case_number" "$case_name" >&3
+    exec >"$case_log" 2>&1
+}
+
 cleanup() {
     status=$?
-    trap - EXIT
+    trap - EXIT ERR
+    exec 1>&3 2>&4
+    if [[ "$status" -ne 0 && -n "$case_name" ]]; then
+        printf '     FAIL: %s (exit %s)\n' "$case_name" "$status" >&2
+        if [[ -f "$case_log" ]]; then
+            cat "$case_log" >&2
+        fi
+    fi
     if [[ -f "$work/project/.ddev/config.yaml" ]]; then
         cd "$work/project"
         if ! "$TEST_DDEV" delete -Oy >"$work/cleanup.log" 2>&1; then
@@ -32,12 +62,15 @@ cleanup() {
     if [[ "$status" -eq 0 ]]; then
         cd /
         rm -rf -- "$work"
+        printf '\nAll isolated DDEV smoke checks passed. (%s scenarios)\n' "$case_number"
     else
         echo "Fixture logs: $work" >&2
     fi
     exit "$status"
 }
 trap cleanup EXIT
+# Plain shell assertions (test, cmp, [[ ... ]]) otherwise fail silently.
+trap 'printf "Assertion or command failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 fail() {
     echo "FAIL: $*" >&2
@@ -64,6 +97,7 @@ expect_failure() {
     assert_log_contains "$work/failure.log" -F -- "$message"
 }
 
+begin_case 'Create an isolated DDEV project (no live server access)'
 mkdir -p "$work/project/public/fileadmin" "$work/bin" "$work/config/ddev"
 cd "$work/project"
 cat >"$work/config/ddev/global_config.yaml" <<'YAML'
@@ -76,7 +110,7 @@ YAML
 printf '\ndisable_settings_management: true\nperformance_mode: none\n' >>.ddev/config.yaml
 printf '<?php echo "fixture";\n' >public/index.php
 
-echo 'Testing install, managed update, customized update and both removal paths'
+begin_case 'Install the add-on and verify the provider, license and manifest'
 install_source=${1:-"$addon"}
 if [[ $# -gt 0 ]]; then
     shift
@@ -94,6 +128,7 @@ tail -n +5 "$copying" | cmp - "$addon/LICENSE.txt"
 test -f "$manifest"
 "$TEST_DDEV" pull --help >"$work/help.log"
 assert_log_contains "$work/help.log" -F 'Pull with deployer'
+begin_case 'Update generated files and preserve customized provider files'
 echo '# managed test edit' >>"$provider"
 get_addon "$@"
 cmp "$provider" "$addon/providers/deployer.yaml"
@@ -102,9 +137,11 @@ echo '# protected test edit' >>"$work/custom.yaml"
 cp "$work/custom.yaml" "$provider"
 get_addon "$@"
 cmp "$provider" "$work/custom.yaml"
+begin_case 'Remove the add-on while preserving a customized provider'
 "$TEST_DDEV" add-on remove typo3-deployer-pull
 cmp "$provider" "$work/custom.yaml"
 test ! -e "$manifest"
+begin_case 'Remove managed files and reinstall the add-on'
 rm "$provider"
 get_addon "$@"
 "$TEST_DDEV" add-on remove typo3-deployer-pull
@@ -114,6 +151,7 @@ test ! -e "$copying"
 test ! -e "$manifest"
 get_addon "$@"
 
+begin_case 'Reject missing host-side rsync before importing anything'
 # Fail rsync lookup with a private PATH, without modifying host executables.
 mkdir "$work/no-rsync"
 for program in ddev ssh; do
@@ -123,6 +161,7 @@ expect_failure 'Missing on this machine: rsync' env PATH="$work/no-rsync" \
     DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" DDEV_DOCROOT=public host=production \
     /bin/bash .ddev/typo3-deployer-pull/pull.sh check
 
+begin_case 'Create simulated SSH and TYPO3 endpoints and start real DDEV containers'
 # Run real rsync through a fixture-local SSH transport. Run real database imports
 # while recording TYPO3 CLI calls, so no TYPO3 installation is required.
 cat >"$work/bin/ddev" <<'BASH'
@@ -263,7 +302,7 @@ touch "$fileadmin/local-only"
 mkdir -p "$fileadmin/_processed_" "$fileadmin/_temp_"
 touch "$fileadmin/_processed_/keep" "$fileadmin/_temp_/keep"
 
-echo 'Testing DDEV confirmation, combined pull, host override, skip flags and file mirroring'
+begin_case 'Decline the confirmation prompt without changing local data'
 if printf 'n\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer >"$work/confirm.log" 2>&1; then
     fail 'the pull should be cancelled when the user declines'
 fi
@@ -273,7 +312,7 @@ test ! -e "$work/typo3.log"
 test -f "$fileadmin/local-only"
 # The fixture SSH alias resolves to a DNS name, while production declares
 # an IP address. Both database and file pulls must use the existing alias.
-echo 'Testing a DNS hostname in SSH config with an IP in .hosts.yml'
+begin_case 'Pull production database and files through the SSH alias; verify YAML merges, PHP flags and exclusions'
 printf 'y\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer
 check_db production
 [[ "$(cat "$fileadmin/from-server")" == production ]]
@@ -290,13 +329,16 @@ cmp "$work/expected-cli.log" "$work/typo3.log"
 assert_log_contains "$work/ssh.log" -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/production/current && $work/production/bin/php -d memory_limit=128M vendor/bin/typo3"
 assert_log_contains "$work/ssh.log" -F -- "-T -o RemoteCommand=none $project rsync --server"
 
+begin_case 'Pull only the staging database; preserve local files'
 pull --skip-files --environment=host=staging --skip-confirmation
 check_db staging
 assert_log_contains "$work/ssh.log" -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/staging/current &&"
 [[ "$(cat "$fileadmin/from-server")" == production ]]
+begin_case 'Pull only staging files; preserve the database'
 pull --skip-db --environment=host=staging -y
 check_db staging
 [[ "$(cat "$fileadmin/from-server")" == staging ]]
+begin_case 'Skip imports; verify the downloaded SQL dump is private'
 pull --skip-files --skip-import
 check_db staging
 test -s "$dump"
@@ -308,18 +350,21 @@ fi
 pull --skip-import
 check_db staging
 [[ "$(cat "$fileadmin/from-server")" == staging ]]
+begin_case 'Skip both database and files without modifying the database'
 pull --skip-db --skip-files -y
 check_db staging
 
-echo 'Testing failure paths before local changes'
+begin_case 'Reject noisy or truncated SQL dumps'
 TEST_DUMP=noisy expect_failure 'dump is incomplete' pull -y
 TEST_DUMP=truncated expect_failure 'dump is incomplete' pull -y
+begin_case 'Report SSH authentication failures without losing the exit status'
 # Both a transport failure and a remote PHP fatal error may return 255.
 TEST_SSH_FAILURE=1 expect_failure 'Permission denied (publickey).' pull -y
 assert_log_contains "$work/failure.log" -F 'can indicate an SSH connection error or a failed remote command'
 assert_log_contains "$work/failure.log" -E 'exit status 255$'
 test ! -e "$dump"
 check_db staging
+begin_case 'Distinguish remote PHP failures from SSH configuration errors'
 for php_status in 255 1; do
     TEST_PHP_FAILURE=$php_status expect_failure 'Composer detected issues in your platform:' pull -y
     assert_log_contains "$work/failure.log" -F "If PHP failed, check the remote CLI PHP environment or bin/php for host 'production' in .hosts.yml"
@@ -332,6 +377,7 @@ for php_status in 255 1; do
     check_db staging
     [[ "$(cat "$fileadmin/from-server")" == staging ]]
 done
+begin_case 'Reject missing local and remote TYPO3 Console commands; respect skip flags'
 # Check the additional schema command only for a database import; no package-name
 # or version heuristic is needed. Failure must not replace the local database.
 # The native cache:flush command needs no preflight; actual failure is tested below.
@@ -346,6 +392,7 @@ TEST_LOCAL_CLI_MISSING=database:updateschema pull --skip-db --environment=host=s
 TEST_LOCAL_CLI_MISSING=database:updateschema pull --skip-files --skip-import -y
 check_db staging
 
+begin_case 'Preserve existing SQL dumps and symlinks on export failure'
 # DDEV normally manages its downloads directory. Test the helper directly to
 # ensure it never truncates or deletes a pre-existing dump on export failure.
 helper() {
@@ -363,6 +410,7 @@ test -L "$dump"
 test -s "$work/saved-dump"
 rm "$dump"
 
+begin_case 'Report import, schema and cache failures; retain the dump until successful recovery'
 # Phase-specific diagnostics and recovery: keep the valid dump on local failure.
 cp "$work/saved-dump" "$dump"
 TEST_IMPORT_FAILURE=1 expect_failure 'Database import failed. The local database may be incomplete.' helper import-db
@@ -379,6 +427,7 @@ check_db production
 pull --skip-files --environment=host=staging -y
 check_db staging
 
+begin_case 'Reject protected project metadata as a file synchronization destination'
 # Protect project metadata even when an upload path is a symlink.
 mkdir -p .git
 expect_failure 'protected project metadata' env DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" host=production \
@@ -389,6 +438,7 @@ expect_failure 'protected project metadata' env DDEV_APPROOT="$PWD" DDEV_PROJECT
 rm public/metadata-link
 rmdir .git
 
+begin_case 'Reject SSH user or port mismatches before remote transfers'
 # Explicit user or port mismatches must stop before any remote transfer or local import.
 remote_calls_before=$(grep -c '^-T ' "$work/ssh.log")
 for mismatch in TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
@@ -398,10 +448,12 @@ for mismatch in TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
     assert_log_contains "$work/failure.log" -F 'IdentitiesOnly yes'
 done
 [[ "$(grep -c '^-T ' "$work/ssh.log")" == "$remote_calls_before" ]]
+begin_case 'Reject unknown hosts and template-only host definitions'
 expect_failure "No absolute deploy_path for host 'invalid'" pull --environment=host=invalid -y
 expect_failure "No absolute deploy_path for host '.base'" pull --environment=host=.base -y
 check_db staging
 [[ "$(cat "$fileadmin/from-server")" == staging ]]
+begin_case 'Reject missing local directories and symlinks outside the project'
 mv "$fileadmin" "$work/outside"
 expect_failure 'does not exist' pull --skip-files -y
 ln -s "$work/outside" "$fileadmin"
@@ -411,7 +463,7 @@ test -f "$work/outside/from-server"
 rm "$fileadmin"
 mv "$work/outside" "$fileadmin"
 
-echo 'Testing an rsync failure, its exit status and a completed database import'
+begin_case 'Preserve rsync exit statuses and report partial updates after database import'
 TEST_RSYNC_FAILURE=1 expect_failure 'The mirror of public/fileadmin may be incomplete' pull --skip-db -y
 assert_log_contains "$work/failure.log" -F 'Illegal byte sequence (92)'
 assert_log_contains "$work/failure.log" -E 'exit status 23$'
@@ -423,7 +475,7 @@ TEST_RSYNC_FAILURE=1 expect_failure 'Any database imported by this pull stays in
 check_db production
 [[ "$(cat "$fileadmin/from-server")" == staging ]]
 
-echo 'Testing the effective upload_dirs list, including a path outside the docroot'
+begin_case 'Mirror multiple upload directories, including one outside the docroot'
 cat >.ddev/config.uploads.yaml <<'YAML'
 upload_dirs:
   - fileadmin
@@ -445,7 +497,7 @@ check_db production
 test ! -e public/uploads/local-only
 test ! -e shared-uploads/local-only
 
-echo 'Testing all remote file sources before mirroring any local destination'
+begin_case 'Reject missing remote upload sources before mirroring; allow database-only pulls'
 touch "$fileadmin/preflight-keep"
 mv "$work/staging/current/shared-uploads" "$work/staging/missing-uploads"
 expect_failure 'Remote upload directory does not exist:' pull --skip-db --environment=host=staging -y
@@ -457,12 +509,13 @@ check_db staging
 mv "$work/staging/missing-uploads" "$work/staging/current/shared-uploads"
 pull --skip-files --environment=host=production -y
 check_db production
+begin_case 'Reject missing remote rsync before changing local files'
 TEST_REMOTE_RSYNC_MISSING=1 expect_failure 'rsync is not available on the deployment server.' pull --skip-db --environment=host=staging -y
 test -f "$fileadmin/preflight-keep"
 pull --skip-db --environment=host=staging -y
 test ! -e "$fileadmin/preflight-keep"
 
-echo 'Testing node_modules exclusions, including nested directories and dependency-only lists'
+begin_case 'Skip configured node_modules directories and protect nested local dependencies'
 cat >.ddev/config.uploads.yaml <<'YAML'
 upload_dirs:
   - fileadmin
@@ -488,6 +541,7 @@ if grep -Fq '/node_modules/' "$work/ssh.log"; then
     cat "$work/ssh.log" >&2
     fail 'node_modules must not be a remote source directory'
 fi
+begin_case 'Prevent remote node_modules from overwriting or adding local dependencies'
 # Existing remote dependencies must not overwrite local dependencies either.
 mkdir -p "$work/staging/current/public/fileadmin/node_modules"
 printf '%s\n' remote >"$work/staging/current/public/fileadmin/node_modules/keep"
@@ -496,6 +550,7 @@ pull --skip-db --environment=host=staging -y
 [[ "$(cat public/fileadmin/node_modules/keep)" == local ]]
 test ! -e public/fileadmin/node_modules/remote-only
 
+begin_case 'Complete a dependency-only file pull without invoking rsync'
 printf 'upload_dirs:\n  - ../node_modules\n' >.ddev/config.uploads.yaml
 : >"$work/ssh.log"
 pull --skip-db --environment=host=staging -y
@@ -506,6 +561,7 @@ if grep -Fq 'rsync --server' "$work/ssh.log"; then
 fi
 check_db production
 
+begin_case 'Reject unsafe remote path characters'
 # Remote paths reach the remote shell unquoted, so they are refused early.
 mkdir 'shared uploads'
 printf 'upload_dirs:\n  - fileadmin\n  - "../shared uploads"\n' >.ddev/config.uploads.yaml
@@ -519,6 +575,7 @@ upload_dirs:
   - ../shared-uploads
 YAML
 
+begin_case 'Reject a secondary upload destination outside the project'
 mv public/uploads "$work/outside-uploads"
 ln -s "$work/outside-uploads" public/uploads
 expect_failure 'public/uploads must resolve to a directory inside the project' pull --environment=host=staging -y
@@ -528,7 +585,7 @@ rm public/uploads
 mv "$work/outside-uploads" public/uploads
 rm .ddev/config.uploads.yaml
 
-echo 'Testing an empty docroot and direct CLI execution without bin/php'
+begin_case 'Pull with an empty docroot and the default executable TYPO3 CLI'
 mkdir -p "$work/production/current/fileadmin" fileadmin
 touch "$work/production/current/fileadmin/root-docroot"
 printf 'hosts:\n  production:\n    hostname: deployment.example.invalid\n    deploy_path: %s/production\n' "$work" >.hosts.yml
@@ -547,4 +604,4 @@ assert_log_contains "$work/ssh.log" -F -- "cd -- $work/production/current && ven
 pull --skip-db -y
 test -f fileadmin/root-docroot
 
-echo 'All isolated DDEV smoke checks passed.'
+pass_case
