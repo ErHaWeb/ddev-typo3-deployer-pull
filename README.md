@@ -24,7 +24,7 @@ does not push changes back to the server.
 | Where | What you need |
 | --- | --- |
 | Local computer | [DDEV](https://ddev.com/) 1.25.0 or later, Bash, OpenSSH and rsync |
-| Local project | A Composer-based DDEV project of type `typo3` with compatible PHP and MySQL/MariaDB versions |
+| Local project | A Composer-based DDEV project of type `typo3` with compatible PHP and MySQL/MariaDB versions; shared `.hosts.yml` inventory in the project root |
 | Deployment server | A Deployer release accessible via SSH, with rsync for file pulls and a compatible MySQL/MariaDB dump client for database pulls |
 | Database pulls | [TYPO3 Console](https://github.com/TYPO3-Console/typo3_console) 8 or 9, installed locally and in the remote release |
 
@@ -57,8 +57,13 @@ TYPO3 installation. Files-only pulls do not need TYPO3 Console.
 
 ### 3. Check your Deployer host configuration
 
-The add-on reads `.hosts.yml` from the project root. Reuse your existing
-file; no duplicate provider configuration is needed. A minimal example:
+The add-on requires a `.hosts.yml` file in the project root. This is a
+convention of the add-on, not a requirement of Deployer itself. A shared
+YAML host inventory lets both tools use the same deployment settings
+without installing Deployer locally or maintaining duplicate configuration.
+
+Reuse your existing inventory if it already follows this convention.
+Otherwise, define your deployment hosts in `.hosts.yml`, for example:
 
 ```yaml
 hosts:
@@ -70,6 +75,19 @@ hosts:
 
 Replace the example values with your own. `deploy_path` is the directory
 containing Deployer's `current` link, not `current` itself.
+
+In your existing `deploy.php` (in the `Deployer` namespace), load the shared
+file using Deployer's native inventory import:
+
+```php
+import(__DIR__ . '/.hosts.yml');
+```
+
+Keep your deployment tasks and recipes unchanged, and define the hosts in
+the inventory rather than duplicating their definitions in PHP. If your
+Deployer recipe is written in YAML, include `.hosts.yml` in its `import`
+list instead. See [Deployer's host documentation](https://deployer.org/docs/8.x/hosts#yaml-inventory)
+for details.
 
 ### 4. Check your SSH connection
 
@@ -204,6 +222,7 @@ is usually just a summary.
 | --- | --- |
 | SSH authentication or connection fails | Test `ssh <DDEV-project-name>`; check your key, network and host key. |
 | SSH alias does not match the selected host | Compare the effective SSH user and port (`ssh -G <alias>`) with `remote_user` and `port` in `.hosts.yml`. Different DNS names and IP spellings are allowed; keep your working `HostName` and key. |
+| `.hosts.yml` is missing | Create or reuse the shared Deployer inventory as shown in [Quick start, step 3](#3-check-your-deployer-host-configuration). |
 | Host or deployment path is invalid | Check the selected host and its absolute `deploy_path` in the project-root `.hosts.yml`. |
 | Remote PHP version is incompatible | Run the remote CLI check above; configure `bin/php` only if needed. Exit status 255 alone does not prove an SSH error. |
 | `database:export` is unavailable | Install and deploy TYPO3 Console on the remote website. Check the remote CLI and dump client. |

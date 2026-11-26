@@ -4,8 +4,17 @@ This page supplements the [quick start and usage guide](../README.md).
 
 ## Deployer host settings
 
-The add-on reads `.hosts.yml` in the DDEV project root using the Mike Farah
-`yq` included in the DDEV web container. YAML anchors, aliases and merge keys
+The project-root `.hosts.yml` is the add-on's required shared inventory
+convention, not a mandatory Deployer file. Deployer supports other file
+names and PHP or YAML recipes; the provider intentionally does not discover
+or evaluate those recipes. Import the shared inventory into your deployment
+recipe as shown in the [quick start](../README.md#3-check-your-deployer-host-configuration).
+Settings needed by the provider must be present in this inventory (including
+values inherited through YAML merge keys), rather than defined only in a
+Deployer recipe or callback.
+
+The add-on reads the inventory using the Mike Farah `yq` included in the
+DDEV web container. YAML anchors, aliases and merge keys
 are supported using `--yaml-fix-merge-anchor-to-spec=true`.
 
 ```yaml
