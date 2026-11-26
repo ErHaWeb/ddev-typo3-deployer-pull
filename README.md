@@ -1,14 +1,14 @@
 # TYPO3 Deployer Pull for DDEV
 
-Refresh a local TYPO3 database and `fileadmin/` from an active Deployer
+Refresh a local TYPO3 database and upload directories from an active Deployer
 release with `ddev pull deployer`. The provider runs on the host and uses your
 existing SSH configuration, agent and host-key checks.
 
 > [!WARNING]
 > **Use this add-on at your own risk. A pull can permanently destroy local data.**
-> It replaces the local database and mirrors `fileadmin/`. Local uploads and
-> edits can be overwritten or deleted. Verify the upstream host and local
-> project. Back up the local database and `fileadmin/` before running a pull.
+> It replaces the local database and mirrors the configured upload directories.
+> Local uploads and edits can be overwritten or deleted. Verify the upstream
+> host and local project. Back up the database and upload directories first.
 
 ## Install, update and remove
 
@@ -45,7 +45,7 @@ until you move it.
   (`helhum/typo3-console` 8 or 9) locally and remotely. Match the local
   database engine and version to the server.
 - The host needs Bash, OpenSSH, rsync and the standard
-  `awk`, `sed`, `tr`, `head`, `tail`, `cat`, `grep`, `mktemp` and `rm` tools.
+  `awk`, `sed`, `tr`, `head`, `tail` and `rm` tools.
   The server needs rsync and a dump client usable by TYPO3 Console.
 - Add an SSH alias named after the DDEV project. All environments in the
   example use that same SSH account.
@@ -81,9 +81,21 @@ in the remote shell, so use trusted project configuration.
 set('bin/php', '{{deploy_path}}/bin/php -d memory_limit=128M');
 ```
 
-Each `<deploy_path>/current` must have `vendor/bin/typo3` and
-`<docroot>/fileadmin/`, with the same docroot as DDEV. The local
-`fileadmin/` must already exist and resolve inside the project.
+Each `<deploy_path>/current` must have `vendor/bin/typo3` and the upload
+directories at the same paths relative to the project root as in DDEV.
+The provider mirrors DDEV's effective `upload_dirs`. TYPO3 defaults to
+`fileadmin` when no custom list is configured. To also mirror `uploads`,
+configure both directories in `.ddev/config.yaml`:
+
+```yaml
+upload_dirs:
+  - fileadmin
+  - uploads
+```
+
+DDEV resolves these paths relative to the docroot. Each local destination
+must already exist and resolve to a distinct directory inside the project.
+Like `deploy_path`, upload directory paths must not contain whitespace.
 
 ## Use
 
@@ -91,9 +103,9 @@ Each `<deploy_path>/current` must have `vendor/bin/typo3` and
 
 - **Verify the local project and the upstream host.** The default upstream
   host is `production`. Use this add-on in disposable development environments.
-- **Back up the database and `fileadmin/` separately.** A DDEV snapshot covers
-  the database. Keep a separate copy of `fileadmin/` outside the project and
-  verify that both backups can be restored. See [DDEV database snapshots](https://docs.ddev.com/en/stable/users/usage/database-management/#snapshots).
+- **Back up the database and upload directories separately.** A DDEV snapshot
+  covers the database. Keep a separate copy of the upload directories outside
+  the project and verify that both backups can be restored. See [DDEV database snapshots](https://docs.ddev.com/en/stable/users/usage/database-management/#snapshots).
 - **Plan for partial failure.** The database is replaced before files are
   mirrored. A failed import can leave an incomplete database. An interrupted
   file transfer can leave the new database paired with partly updated or
@@ -115,7 +127,7 @@ ddev pull deployer --skip-db                    # Files only
 ddev pull deployer --skip-files --skip-import   # Fetch and validate a dump without importing
 ```
 
-The preflight requires rsync and a valid `fileadmin/` even with skip flags.
+The preflight requires rsync and valid upload destinations even with skip flags.
 It checks the effective OpenSSH settings for the DDEV project name before
 connecting. If the destination and identity settings are all OpenSSH
 defaults, add or correct the matching `Host` entry in `~/.ssh/config`.
@@ -136,14 +148,12 @@ runs and `--skip-import` can leave a restricted-permission dump at
 Rsync mirrors content, timestamps and safe symlinks. It deletes local files
 absent upstream. It leaves `_processed_/` and `_temp_/` alone and uses local
 ownership and permission defaults. Run one pull at a time
-per project. The provider handles a single database connection and
-`fileadmin/`, with no push operation or other storage synchronization.
+per project. The provider handles a single database connection and the
+upload directories listed by DDEV.
 
-If rsync fails, the provider shows the original error and warns that
-the file mirror may be incomplete. A filename encoding error calls for checking
-the affected names on the deployment host. A missing basis file calls for
-checking whether local files were changed during the incremental transfer.
-After resolving the error, use `--skip-db` to retry the files alone.
+If rsync fails, the provider shows rsync's error, keeps its exit status and
+warns that the mirror may be incomplete. After resolving the error, use
+`--skip-db` to retry the files alone.
 
 ## Platform coverage
 

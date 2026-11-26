@@ -108,7 +108,7 @@ get_addon "$@"
 
 # Fail rsync lookup with a private PATH, without modifying host executables.
 mkdir "$work/no-rsync"
-for program in ddev ssh awk sed tr head tail cat grep mktemp rm; do
+for program in ddev ssh awk sed tr head tail rm; do
     ln -s "$(command -v "$program")" "$work/no-rsync/$program"
 done
 expect_failure 'Missing on this machine: rsync' env PATH="$work/no-rsync" \
@@ -157,16 +157,10 @@ BASH
 cat >"$work/bin/rsync" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-case "${TEST_RSYNC_FAILURE:-}" in
-    filename)
-        printf '%s\n' "rsync: [receiver] mkstemp failed: Illegal byte sequence (92)" >&2
-        exit 23
-        ;;
-    basis)
-        printf '%s\n' "got a block match with no basis file for fixture.png [receiver]" >&2
-        exit 2
-        ;;
-esac
+if [[ -n "${TEST_RSYNC_FAILURE:-}" ]]; then
+    printf '%s\n' "rsync: [receiver] mkstemp failed: Illegal byte sequence (92)" >&2
+    exit 23
+fi
 exec "$TEST_RSYNC" "$@"
 BASH
 chmod +x "$work/bin/ddev" "$work/bin/ssh" "$work/bin/rsync"
@@ -289,17 +283,58 @@ test -f "$work/outside/from-server"
 rm "$fileadmin"
 mv "$work/outside" "$fileadmin"
 
-echo 'Testing rsync diagnostics, exit status and a completed database import'
-TEST_RSYNC_FAILURE=filename expect_failure 'The local filesystem rejected a filename' pull --skip-db -y
+echo 'Testing an rsync failure, its exit status and a completed database import'
+TEST_RSYNC_FAILURE=1 expect_failure 'The mirror of public/fileadmin may be incomplete' pull --skip-db -y
 grep -F 'Illegal byte sequence (92)' "$work/failure.log"
 grep -E 'exit status 23$' "$work/failure.log"
 check_db staging
-TEST_RSYNC_FAILURE=basis expect_failure 'rsync could not use a local reference file' pull -y
-grep -F 'got a block match with no basis file' "$work/failure.log"
-grep -E 'exit status 2$' "$work/failure.log"
-grep -F 'Any database already imported by this pull stays in place' "$work/failure.log"
+TEST_RSYNC_FAILURE=1 expect_failure 'Any database imported by this pull stays in place' pull -y
 check_db production
 [[ "$(cat "$fileadmin/from-server")" == staging ]]
+
+echo 'Testing the effective upload_dirs list, including a path outside the docroot'
+cat >.ddev/config.uploads.yaml <<'YAML'
+upload_dirs:
+  - fileadmin
+  - uploads
+  - ../shared-uploads
+YAML
+mkdir -p public/uploads shared-uploads
+touch public/uploads/local-only shared-uploads/local-only
+for environment in production staging; do
+    release="$work/$environment/current"
+    mkdir -p "$release/public/uploads" "$release/shared-uploads"
+    printf '%s\n' "$environment" >"$release/public/uploads/from-server"
+    printf '%s\n' "$environment" >"$release/shared-uploads/from-server"
+done
+pull --skip-db --environment=host=staging -y
+check_db production
+[[ "$(cat public/uploads/from-server)" == staging ]]
+[[ "$(cat shared-uploads/from-server)" == staging ]]
+test ! -e public/uploads/local-only
+test ! -e shared-uploads/local-only
+
+# openrsync drops the quotes of --rsync-path, so whitespace is refused early.
+mkdir 'shared uploads'
+printf 'upload_dirs:\n  - fileadmin\n  - "../shared uploads"\n' >.ddev/config.uploads.yaml
+expect_failure "DDEV upload directory 'shared uploads' must not contain whitespace" pull --environment=host=staging -y
+check_db production
+rmdir 'shared uploads'
+cat >.ddev/config.uploads.yaml <<'YAML'
+upload_dirs:
+  - fileadmin
+  - uploads
+  - ../shared-uploads
+YAML
+
+mv public/uploads "$work/outside-uploads"
+ln -s "$work/outside-uploads" public/uploads
+expect_failure 'public/uploads must resolve to a directory inside the project' pull --environment=host=staging -y
+check_db production
+[[ "$(cat "$work/outside-uploads/from-server")" == staging ]]
+rm public/uploads
+mv "$work/outside-uploads" public/uploads
+rm .ddev/config.uploads.yaml
 
 echo 'Testing an empty docroot and PHP fallback'
 mkdir -p "$work/production/current/fileadmin" fileadmin

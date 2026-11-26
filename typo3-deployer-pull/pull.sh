@@ -8,7 +8,6 @@ set -euo pipefail
 cd -P -- "${DDEV_APPROOT:?Run this script through ddev pull deployer}"
 project_root=$PWD
 export host="${host:?No Deployer host selected}"
-files="${DDEV_DOCROOT:+${DDEV_DOCROOT}/}fileadmin"
 dump=.ddev/.downloads/db.sql
 
 die() {
@@ -18,7 +17,7 @@ die() {
 
 check_programs() {
     local program missing=""
-    for program in ddev ssh rsync awk sed tr head tail cat grep mktemp rm; do
+    for program in ddev ssh rsync awk sed tr head tail rm; do
         command -v "$program" >/dev/null || missing="$missing $program"
     done
     [[ -z "$missing" ]] || die "Missing on this machine:$missing. Nothing has been imported."
@@ -42,15 +41,6 @@ check_ssh_configuration() {
             "Set the deployment HostName, User and SSH key or agent settings." >&2
         die "The pull stopped before importing any data."
     fi
-}
-
-enter_fileadmin() {
-    cd -P -- "./$files" 2>/dev/null \
-        || die "$files does not exist. Run ddev restart or create the directory."
-    case "$PWD/" in
-        "$project_root/"?*) ;;
-        *) die "$files must resolve to a directory inside the project, but resolves to $PWD." ;;
-    esac
 }
 
 read_deploy_path() {
@@ -90,6 +80,42 @@ read_deploy_path() {
     ' .hosts.yml
 }
 
+# DDEV lists the effective upload_dirs as container paths in DDEV_FILES_DIRS.
+read_upload_directories() {
+    local path
+    local -a paths
+    [[ -n "${DDEV_FILES_DIRS:-}" ]] || die "DDEV lists no upload directory. Check upload_dirs."
+    IFS=, read -r -a paths <<< "$DDEV_FILES_DIRS"
+    upload_directories=()
+    for path in "${paths[@]}"; do
+        path=${path#/var/www/html/}
+        case "$path" in
+            /*|'') die "DDEV upload directory '$path' must be a subdirectory of the project." ;;
+            # openrsync drops the quotes of --rsync-path, so whitespace would
+            # split the remote path, as for deploy_path.
+            *[[:space:]]*) die "DDEV upload directory '$path' must not contain whitespace." ;;
+        esac
+        upload_directories+=("$path")
+    done
+}
+
+enter_upload_directory() {
+    cd -P -- "$project_root/$1" 2>/dev/null \
+        || die "$1 does not exist. Run ddev restart or create the directory."
+    [[ "$PWD/" == "$project_root/"?* ]] \
+        || die "$1 must resolve to a directory inside the project, but resolves to $PWD."
+}
+
+check_upload_directories() {
+    local directory resolved seen=$'\n'
+    for directory in "${upload_directories[@]}"; do
+        resolved=$(enter_upload_directory "$directory" && pwd -P) || exit 1
+        [[ "$seen" != *$'\n'"$resolved"$'\n'* ]] \
+            || die "Several DDEV upload directories resolve to $resolved."
+        seen+="$resolved"$'\n'
+    done
+}
+
 # The remote login shell interprets a command string, not an argv array.
 quote_for_remote_shell() {
     printf "'%s'" "${1//\'/\'\\\'\'}"
@@ -101,12 +127,27 @@ validate_dump() {
         || die "The dump is incomplete or contains unexpected output. The database has not been imported."
 }
 
+mirror_upload_directory() (
+    enter_upload_directory "$2"
+    echo "Mirroring $2 of $host ($1) ..."
+    rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ \
+        -e 'ssh -T -o RemoteCommand=none' \
+        --rsync-path="cd -- $(quote_for_remote_shell "$1/current/$2") && rsync" \
+        -- "$DDEV_PROJECT:./" ./ || {
+        status=$?
+        printf '%s\n' "The mirror of $2 may be incomplete. Any database imported by this pull stays in place." \
+            "After fixing the cause above, repeat the pull with --skip-db." >&2
+        exit "$status"
+    }
+)
+
 case "${1:-}" in
     check)
         check_programs
         read_deploy_path >/dev/null
         check_ssh_configuration
-        enter_fileadmin
+        read_upload_directories
+        check_upload_directories
         ;;
     export-db)
         deploy_path=$(read_deploy_path)
@@ -119,14 +160,11 @@ case "${1:-}" in
         set -o noclobber
         ssh -T -o RemoteCommand=none -C -- "$DDEV_PROJECT" \
             "cd -- $(quote_for_remote_shell "$deploy_path/current") && ${php_command:-php} vendor/bin/typo3 --no-interaction database:export -c Default -e 'cache_*' -e '[bf]e_sessions' -e sys_log -e sys_http_report -e sys_file_processedfile" > "$dump" || {
-                ssh_status=$?
-                if ((ssh_status == 255)); then
-                    printf '%s\n' "The SSH session for '$DDEV_PROJECT' failed." \
-                        "Check the host, remote user, host key and authentication for the alias in ~/.ssh/config." \
-                        "The pull stopped before importing the database." >&2
-                fi
-                exit "$ssh_status"
-            }
+            status=$?
+            ((status != 255)) || printf '%s\n' "The SSH session for '$DDEV_PROJECT' failed." \
+                "Check host, user, host key and authentication in ~/.ssh/config. The database has not been imported." >&2
+            exit "$status"
+        }
         validate_dump
         ;;
     import-db)
@@ -138,31 +176,11 @@ case "${1:-}" in
         ;;
     mirror-files)
         deploy_path=$(read_deploy_path)
-        enter_fileadmin
-        echo "Mirroring fileadmin of $host ($deploy_path) ..."
-        rsync_log=$(mktemp "${TMPDIR:-/tmp}/ddev-deployer-rsync.XXXXXXXX")
-        trap 'rm -f -- "$rsync_log"' EXIT
-        rsync_status=0
-        rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ \
-            -e 'ssh -T -o RemoteCommand=none' \
-            --rsync-path="cd -- $(quote_for_remote_shell "$deploy_path/current/$files") && rsync" \
-            -- "$DDEV_PROJECT:./" ./ 2>"$rsync_log" || rsync_status=$?
-        cat "$rsync_log" >&2
-
-        if ((rsync_status != 0)); then
-            if grep -Eiq 'Illegal byte sequence|Invalid or incomplete multibyte or wide character' "$rsync_log"; then
-                printf '%s\n' "The local filesystem rejected a filename." \
-                    "Check the affected names above for legacy encodings on the deployment host." >&2
-            fi
-            if grep -Fq 'got a block match with no basis file' "$rsync_log"; then
-                printf '%s\n' "rsync could not use a local reference file for its incremental transfer." \
-                    "Check whether fileadmin was changed during the pull." >&2
-            fi
-            printf '%s\n' "The file mirror may be incomplete (rsync exit $rsync_status)." \
-                "Any database already imported by this pull stays in place." \
-                "After fixing the cause, retry the same pull with --skip-db to pull only the files." >&2
-            exit "$rsync_status"
-        fi
+        read_upload_directories
+        check_upload_directories
+        for directory in "${upload_directories[@]}"; do
+            mirror_upload_directory "$deploy_path" "$directory"
+        done
         ;;
     *)
         die "Unknown pull step: ${1:-}"
