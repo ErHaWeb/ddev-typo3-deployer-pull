@@ -192,21 +192,49 @@ validate_dump() {
         || die "The dump is incomplete or contains unexpected output. The database has not been imported."
 }
 
+# Keep ordinary rsync errors visible, but group repeated filename diagnostics.
+report_rsync_errors() {
+    local line count=0 limit=3
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            rsync:*'Illegal byte sequence'*)
+                count=$((count + 1))
+                ((count <= limit)) || continue
+                ;;
+        esac
+        printf '%s\n' "$line" >&2
+    done < "$1"
+    if ((count > 0)); then
+        printf '\nFilename encoding: %s rsync diagnostics. The receiving filesystem may reject non-UTF-8 filenames from the server.\n' "$count" >&2
+        if ((count > limit)); then
+            printf 'Showing the first %s filename encoding diagnostics; %s more omitted.\n' "$limit" "$((count - limit))" >&2
+            printf 'Complete rsync error log: %s (may contain sensitive filenames; remove when no longer needed).\n' "$1" >&2
+            keep_error_log=1
+        fi
+    fi
+}
+
 mirror_upload_directory() (
-    local destination
+    local destination error_log status keep_error_log=0
     # Assign first: a failed substitution inside cd would leave cd at "".
     destination=$(resolve_upload_directory "$1") || exit 1
     cd -P -- "$destination"
+    # Capture stderr once per transfer; leave stdout and the exit status intact.
+    error_log=$(mktemp "${TMPDIR:-/tmp}/typo3-deployer-rsync.XXXXXXXX") \
+        || die "Could not create a temporary rsync error log. No files have been mirrored in this directory."
+    trap 'if ((keep_error_log == 0)); then rm -f -- "$error_log"; fi' EXIT
     echo "Mirroring $1 of $host ($deploy_path) ..."
     rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ --exclude=node_modules/ -e "ssh ${ssh_options[*]}" \
-        -- "$ssh_host:$deploy_path/current/$1/" ./ || {
+        -- "$ssh_host:$deploy_path/current/$1/" ./ 2>"$error_log" || {
         status=$?
+        report_rsync_errors "$error_log"
         explain_status_255 "$status"
         printf '%s\n' "The mirror of $1 may be incomplete. Any database imported by this pull stays in place." \
             "See rsync troubleshooting (including filename encoding errors): https://github.com/ErHaWeb/ddev-typo3-deployer-pull#troubleshooting" \
             "After fixing the cause above, repeat the same pull with --skip-db if the database is still current (keep the selected host)." >&2
         exit "$status"
     }
+    cat "$error_log" >&2
 )
 
 case "${1:-}" in

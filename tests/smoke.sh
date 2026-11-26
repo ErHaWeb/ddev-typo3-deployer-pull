@@ -278,7 +278,10 @@ cat >"$work/bin/rsync" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ -n "${TEST_RSYNC_FAILURE:-}" ]]; then
-    printf '%s\n' "rsync: [receiver] mkstemp failed: Illegal byte sequence (92)" >&2
+    for ((i=1; i<=${TEST_RSYNC_ENCODING_ERRORS:-1}; i++)); do
+        printf 'rsync: [receiver] mkstemp file-%s failed: Illegal byte sequence (92)\n' "$i" >&2
+    done
+    printf '%s\n' 'rsync: unrelated transfer error' >&2
     exit "${TEST_RSYNC_STATUS:-23}"
 fi
 exec "$TEST_RSYNC" "$@"
@@ -561,6 +564,26 @@ check_db staging
 TEST_RSYNC_FAILURE=1 expect_failure 'Any database imported by this pull stays in place' pull -y
 check_db production
 [[ "$(cat "$fileadmin/from-server")" == staging ]]
+
+begin_case 'Summarize repeated filename encoding errors without hiding other rsync errors'
+# Invoke the provider directly to count its output independently of DDEV's
+# own error reporting. Keep any retained diagnostic log inside the fixture.
+mkdir "$work/rsync-errors"
+TEST_RSYNC_FAILURE=1 TEST_RSYNC_ENCODING_ERRORS=41 expect_failure \
+    'Filename encoding: 41 rsync diagnostics.' env TMPDIR="$work/rsync-errors" \
+    DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" host=production \
+    DDEV_FILES_DIRS=/var/www/html/public/fileadmin \
+    bash .ddev/typo3-deployer-pull/pull.sh mirror-files
+[[ "$(grep -Fc 'Illegal byte sequence (92)' "$work/failure.log")" == 3 ]]
+[[ "$(grep -Fc 'The mirror of public/fileadmin may be incomplete' "$work/failure.log")" == 1 ]]
+assert_log_contains "$work/failure.log" -F '38 more omitted.'
+assert_log_contains "$work/failure.log" -F 'rsync: unrelated transfer error'
+logs=("$work/rsync-errors"/typo3-deployer-rsync.*)
+[[ "${#logs[@]}" == 1 && -f "${logs[0]}" ]]
+[[ "$(grep -Fc 'Illegal byte sequence (92)' "${logs[0]}")" == 41 ]]
+assert_log_contains "$work/failure.log" -F "Complete rsync error log: ${logs[0]}"
+assert_log_contains "${logs[0]}" -F 'rsync: unrelated transfer error'
+rm -- "${logs[0]}"
 
 begin_case 'Mirror multiple upload directories, including one outside the docroot'
 cat >.ddev/config.uploads.yaml <<'YAML'

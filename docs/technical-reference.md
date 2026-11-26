@@ -114,6 +114,13 @@ timestamps and safe symlinks, using local ownership and permission defaults.
 Files absent upstream are deleted. `_processed_/`, `_temp_/` and
 `node_modules/` are excluded from transfers and deletions.
 
+Each rsync transfer captures stderr in a private temporary file. On failure,
+repeated `Illegal byte sequence` diagnostics are counted, with at most three
+examples printed; unrelated diagnostics and the original exit status are
+preserved. The complete log is retained only when diagnostics are omitted.
+The pull still stops at the first failed directory, rather than starting
+further destructive transfers after an error.
+
 ### Diagnosing filename encoding errors
 
 In an rsync diagnostic, `\#351` is the octal escape for byte `0xE9` (decimal
