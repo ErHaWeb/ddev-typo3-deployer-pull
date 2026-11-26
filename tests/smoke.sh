@@ -276,7 +276,7 @@ test -f "$fileadmin/_processed_/keep"
 test -f "$fileadmin/_temp_/keep"
 test ! -e "$fileadmin/_temp_/from-server"
 test ! -e "$dump"
-printf '%s\n' 'typo3 --no-interaction help database:updateschema' 'typo3 --no-interaction help cache:flush' 'typo3 --no-interaction database:updateschema safe' 'typo3 --no-interaction cache:flush' >"$work/expected-cli.log"
+printf '%s\n' 'typo3 --no-interaction help database:updateschema' 'typo3 --no-interaction database:updateschema safe' 'typo3 --no-interaction cache:flush' >"$work/expected-cli.log"
 cmp "$work/expected-cli.log" "$work/typo3.log"
 # The explicit remote_user wins over the merge key, as in the YAML spec.
 grep -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/production/current && $work/production/bin/php -d memory_limit=128M vendor/bin/typo3" "$work/ssh.log"
@@ -323,14 +323,13 @@ for php_status in 255 1; do
     check_db staging
     [[ "$(cat "$fileadmin/from-server")" == staging ]]
 done
-# Required CLI commands are checked only for a database import; no package-name
+# Check the additional schema command only for a database import; no package-name
 # or version heuristic is needed. Failure must not replace the local database.
-for command in database:updateschema cache:flush; do
-    TEST_LOCAL_CLI_MISSING=$command expect_failure "The local TYPO3 CLI cannot provide '$command'" pull -y
-    test -s "$dump"
-    check_db staging
-    [[ "$(cat "$fileadmin/from-server")" == staging ]]
-done
+# The native cache:flush command needs no preflight; actual failure is tested below.
+TEST_LOCAL_CLI_MISSING=database:updateschema expect_failure "The local TYPO3 CLI cannot provide 'database:updateschema'" pull -y
+test -s "$dump"
+check_db staging
+[[ "$(cat "$fileadmin/from-server")" == staging ]]
 TEST_REMOTE_CLI_MISSING=1 expect_failure 'Check that vendor/bin/typo3 provides database:export' pull -y
 test ! -e "$dump"
 check_db staging

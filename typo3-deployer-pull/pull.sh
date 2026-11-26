@@ -166,16 +166,14 @@ check_remote_upload_directories() {
 }
 
 check_local_cli() {
-    local command status
-    for command in database:updateschema cache:flush; do
-        ddev typo3 --no-interaction help "$command" >/dev/null || {
-            status=$?
-            printf '%s\n' "The local TYPO3 CLI cannot provide '$command'." \
-                'Check the local PHP version, Composer installation and helhum/typo3-console for database:updateschema.' \
-                'The database has not been imported.' >&2
-            exit "$status"
-        }
-    done
+    local status
+    ddev typo3 --no-interaction help database:updateschema >/dev/null || {
+        status=$?
+        printf '%s\n' "The local TYPO3 CLI cannot provide 'database:updateschema'." \
+            'Check the local PHP version, Composer installation and helhum/typo3-console, which provides the schema update command.' \
+            'The database has not been imported.' >&2
+        exit "$status"
+    }
 }
 
 validate_dump() {

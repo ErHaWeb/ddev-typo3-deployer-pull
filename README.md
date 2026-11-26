@@ -42,11 +42,44 @@ until you move it.
 ## Configure the project
 
 - Use a DDEV project of type `typo3`, with TYPO3 Console
-  (`helhum/typo3-console` 8 or 9) locally and remotely. Match the local
-  database engine and version to the server.
+  (`helhum/typo3-console` 8 or 9) locally and remotely for database pulls.
+  Match the local database engine and version to the server.
 - The host needs Bash, OpenSSH and rsync. The provider reads `.hosts.yml`
   with the `yq` of the DDEV web container, so nothing else is installed.
   The server needs rsync and a dump client usable by TYPO3 Console.
+
+### Why TYPO3 Console is required
+
+TYPO3 Console extends the native TYPO3 CLI with the two database commands
+used by this provider:
+
+- **Remote:** [`database:export`](https://docs.typo3.org/p/helhum/typo3-console/main/en-us/CommandReference/DatabaseExport.html)
+  exports the `Default` connection using TYPO3's database configuration and
+  allows the provider to exclude volatile tables such as caches and sessions. This avoids separate
+  database credentials or custom dump-client configuration in the provider.
+- **Local:** [`database:updateschema safe`](https://docs.typo3.org/p/helhum/typo3-console/main/en-us/CommandReference/DatabaseUpdateschema.html)
+  reconciles the imported database with the local code using add/change
+  operations, without explicit rename/drop operations. It does not initialize
+  extensions. The native `extension:setup` command also performs other setup
+  operations, such as static data imports, which are outside the scope of a pull.
+
+The native TYPO3 Core command `cache:flush` clears local caches after the
+schema update; it does not require TYPO3 Console. Files-only pulls do not
+need either database command.
+
+If TYPO3 Console is missing, add it to the project's Composer dependencies
+using the version compatible with its TYPO3 installation:
+
+```bash
+ddev composer require helhum/typo3-console
+```
+
+Keep it in `require`, not `require-dev`, so the remote release also includes
+it when deployed with `composer install --no-dev`. Deploy the updated
+Composer dependencies through your normal CI pipeline. Local and remote
+installations can use different compatible versions of TYPO3 Console.
+
+### Deployer host configuration
 
 The provider reads the Deployer hosts from `.hosts.yml` in the project root,
 the file your `deploy.php` imports. Deployer itself only runs in CI and is
@@ -218,11 +251,11 @@ The provider requires SSH to succeed and checks the dump's TYPO3 Console
 header and completion footer before import. These checks detect interrupted
 or contaminated streams. Import can still fail on SQL errors or an
 incompatible database. Before replacing the local database, the provider
-checks that the local TYPO3 CLI can provide `database:updateschema` and
-`cache:flush`. The commands must be available even before importing; a local
-CLI that cannot bootstrap must be repaired first. After import, the provider
-runs `database:updateschema safe` (add/change operations, not rename/drop)
-and the native `cache:flush`. It does not initialize extensions or run upgrade
+checks that the local TYPO3 CLI can provide `database:updateschema`.
+A local CLI that cannot bootstrap must be repaired first. The native Core
+command `cache:flush` needs no separate availability check. After import,
+the provider runs `database:updateschema safe` (add/change operations, not
+rename/drop) and the native `cache:flush`. It does not initialize extensions or run upgrade
 wizards. The dump is deleted after all three local steps succeed. Failed
 imports or post-import steps and `--skip-import` can leave a restricted-
 permission dump at `.ddev/.downloads/db.sql`. A failed export removes only the
