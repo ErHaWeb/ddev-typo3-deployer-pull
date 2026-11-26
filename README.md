@@ -38,8 +38,11 @@ Run these commands from the root of your local DDEV project.
 
 ```bash
 ddev add-on get ErHaWeb/ddev-typo3-deployer-pull
-ddev restart
 ```
+
+**No restart required:** The add-on is available immediately after installation
+or update, even if DDEV suggests running `ddev restart`. It does not change
+container configuration or install additional services.
 
 ### 2. Check TYPO3 Console
 
@@ -339,7 +342,6 @@ See the [technical reference](docs/technical-reference.md) for details.
 
 ```bash
 ddev add-on get ErHaWeb/ddev-typo3-deployer-pull
-ddev restart
 ```
 
 Use `ddev add-on update` for installed add-ons, or `--version <tag>`
@@ -348,6 +350,10 @@ with `ddev add-on get` for a specific release. To uninstall:
 ```bash
 ddev add-on remove typo3-deployer-pull
 ```
+
+Neither updating nor uninstalling this add-on requires a DDEV restart.
+If you change the DDEV project configuration separately (for example,
+`upload_dirs` or the PHP version), follow DDEV's usual restart instructions.
 
 Commit the installed add-on files and manifest to share the setup with your
 team. DDEV manages files marked `#ddev-generated`; see the
