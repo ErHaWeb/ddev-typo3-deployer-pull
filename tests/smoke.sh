@@ -277,9 +277,9 @@ BASH
 cat >"$work/bin/rsync" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ -n "${TEST_RSYNC_FAILURE:-}" ]]; then
-    for ((i=1; i<=${TEST_RSYNC_ENCODING_ERRORS:-1}; i++)); do
-        printf 'rsync: [receiver] mkstemp file-%s failed: Illegal byte sequence (92)\n' "$i" >&2
+if [[ -n "${TEST_RSYNC_FAILURE:-}" && ( -z "${TEST_RSYNC_FAIL_DIRECTORY:-}" || "${PWD##*/}" == "$TEST_RSYNC_FAIL_DIRECTORY" ) ]]; then
+    for ((i=1; i<=${TEST_RSYNC_ENCODING_ERRORS:-0}; i++)); do
+        printf 'rsync: [receiver] mkstemp "%s/import/documents/.Pi\\#351ce-%s.pdf.ABC123" failed: Illegal byte sequence (92)\n' "$PWD" "$i" >&2
     done
     printf '%s\n' 'rsync: unrelated transfer error' >&2
     exit "${TEST_RSYNC_STATUS:-23}"
@@ -574,8 +574,11 @@ TEST_RSYNC_FAILURE=1 expect_failure 'The mirror of public/fileadmin may be incom
 if grep -Fq '[OK] Synchronized public/fileadmin' "$work/failure.log"; then
     fail 'failed rsync must not report success'
 fi
-assert_log_contains "$work/failure.log" -F 'Illegal byte sequence (92)'
+assert_log_contains "$work/failure.log" -F 'rsync: unrelated transfer error'
 assert_log_contains "$work/failure.log" -F 'https://github.com/ErHaWeb/ddev-typo3-deployer-pull#troubleshooting'
+assert_log_contains "$work/failure.log" -E '\[FAIL\] public/fileadmin \([0-9]+ s, exit 23\)'
+assert_log_contains "$work/failure.log" -F 'Completed upload directories: 0 of 1.'
+assert_log_contains "$work/failure.log" -F 'ddev pull typo3-deployer --skip-db --environment=host=production'
 assert_log_contains "$work/failure.log" -E 'exit status 23$'
 check_db staging
 TEST_RSYNC_FAILURE=1 TEST_RSYNC_STATUS=255 expect_failure 'can indicate an SSH connection error or a failed remote command' pull --skip-db -y
@@ -590,19 +593,35 @@ begin_case 'Summarize repeated filename encoding errors without hiding other rsy
 # own error reporting. Keep any retained diagnostic log inside the fixture.
 mkdir "$work/rsync-errors"
 TEST_RSYNC_FAILURE=1 TEST_RSYNC_ENCODING_ERRORS=41 expect_failure \
-    'Filename encoding: 41 rsync diagnostics.' env TMPDIR="$work/rsync-errors" \
+    'Filename encoding: 41 rsync diagnostics (Illegal byte sequence).' env TMPDIR="$work/rsync-errors" \
     DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" host=production \
     DDEV_FILES_DIRS=/var/www/html/public/fileadmin \
     bash .ddev/typo3-deployer-pull/pull.sh mirror-files
-[[ "$(grep -Fc 'Illegal byte sequence (92)' "$work/failure.log")" == 3 ]]
+[[ "$(grep -Fc 'import/documents/.Pi\#351ce-' "$work/failure.log")" == 3 ]]
+if grep -Fq 'mkstemp' "$work/failure.log"; then
+    fail 'compact diagnostics must not repeat full mkstemp messages'
+fi
 [[ "$(grep -Fc 'The mirror of public/fileadmin may be incomplete' "$work/failure.log")" == 1 ]]
-assert_log_contains "$work/failure.log" -F '38 more omitted.'
+assert_log_contains "$work/failure.log" -F '38 more diagnostics omitted.'
 assert_log_contains "$work/failure.log" -F 'rsync: unrelated transfer error'
+assert_log_contains "$work/failure.log" -F 'https://github.com/ErHaWeb/ddev-typo3-deployer-pull#filename-encoding-errors-on-macos'
+assert_log_contains "$work/failure.log" -F 'import/documents/.Pi\#351ce-1.pdf.ABC123'
+assert_log_contains "$work/failure.log" -F 'If remote database records or file references changed, run a full pull instead:'
 logs=("$work/rsync-errors"/typo3-deployer-rsync.*)
 [[ "${#logs[@]}" == 1 && -f "${logs[0]}" ]]
 [[ "$(grep -Fc 'Illegal byte sequence (92)' "${logs[0]}")" == 41 ]]
 assert_log_contains "$work/failure.log" -F "Complete rsync error log: ${logs[0]}"
 assert_log_contains "${logs[0]}" -F 'rsync: unrelated transfer error'
+rm -- "${logs[0]}"
+# Even one shortened diagnostic needs a complete original log.
+TEST_RSYNC_FAILURE=1 TEST_RSYNC_ENCODING_ERRORS=1 expect_failure \
+    'Filename encoding: 1 rsync diagnostic (Illegal byte sequence).' env TMPDIR="$work/rsync-errors" \
+    DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" host=production \
+    DDEV_FILES_DIRS=/var/www/html/public/fileadmin \
+    bash .ddev/typo3-deployer-pull/pull.sh mirror-files
+logs=("$work/rsync-errors"/typo3-deployer-rsync.*)
+[[ "${#logs[@]}" == 1 && -f "${logs[0]}" ]]
+assert_log_contains "${logs[0]}" -F 'Illegal byte sequence (92)'
 rm -- "${logs[0]}"
 
 begin_case 'Mirror multiple upload directories, including one outside the docroot'
@@ -627,11 +646,27 @@ check_db production
 test ! -e public/uploads/local-only
 test ! -e shared-uploads/local-only
 
+begin_case 'Report completed and unattempted directories after a later transfer fails'
+# The first directory succeeds, the second fails, and the third is not touched.
+touch shared-uploads/untouched-after-failure
+TEST_RSYNC_FAILURE=1 TEST_RSYNC_FAIL_DIRECTORY=uploads expect_failure \
+    'Completed upload directories: 1 of 3.' pull --skip-db --environment=host=staging -y
+assert_log_contains "$work/failure.log" -F '[OK] Synchronized public/fileadmin'
+assert_log_contains "$work/failure.log" -E '\[FAIL\] public/uploads \([0-9]+ s, exit 23\)'
+assert_log_contains "$work/failure.log" -F 'Remaining upload directories not attempted: 1.'
+assert_log_contains "$work/failure.log" -F 'ddev pull typo3-deployer --skip-db --environment=host=staging'
+assert_log_contains "$work/failure.log" -F 'ddev pull typo3-deployer --environment=host=staging'
+test -f shared-uploads/untouched-after-failure
+rm -- shared-uploads/untouched-after-failure
+check_db production
+
 begin_case 'Reject missing remote upload sources before mirroring; allow database-only pulls'
 touch "$fileadmin/preflight-keep"
 mv "$work/staging/current/shared-uploads" "$work/staging/missing-uploads"
 expect_failure 'Remote upload directory does not exist:' pull --skip-db --environment=host=staging -y
 assert_log_contains "$work/failure.log" -F 'No upload directories have been mirrored in this step.'
+assert_log_contains "$work/failure.log" -F 'ddev pull typo3-deployer --skip-db --environment=host=staging'
+assert_log_contains "$work/failure.log" -E '\[FAIL\] Remote file preflight failed \([0-9]+ s, exit 1\)'
 test -f "$fileadmin/preflight-keep"
 # A missing remote upload directory must not block a database-only pull.
 pull --skip-files --environment=host=staging -y

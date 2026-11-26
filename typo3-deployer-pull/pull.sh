@@ -204,6 +204,20 @@ read_upload_directories() {
     done
 }
 
+# The file phase cannot know whether DDEV imported or skipped the database.
+# Give a copyable recovery command without claiming that the database is current.
+report_file_recovery() {
+    local documentation=$1
+    printf '%s\n' \
+        '  Any database imported by this pull stays in place.' \
+        "  Troubleshooting: $documentation" \
+        '' \
+        '  Fix the cause first. If the local database is still current, retry only the files:' >&2
+    printf '    ddev pull typo3-deployer --skip-db --environment=%q\n' "host=$host" >&2
+    printf '%s\n' '  If remote database records or file references changed, run a full pull instead:' >&2
+    printf '    ddev pull typo3-deployer --environment=%q\n' "host=$host" >&2
+}
+
 # Check every source before the first destructive rsync, not in auth_command:
 # DDEV does not expose skip flags there, and database-only pulls need no files.
 check_remote_upload_directories() {
@@ -216,9 +230,10 @@ check_remote_upload_directories() {
     ssh "${ssh_options[@]}" -- "$ssh_host" "$command" || {
         status=$?
         explain_status_255 "$status"
-        printf '%s\n' 'Remote file preflight failed. No upload directories have been mirrored in this step.' \
-            'Check rsync on the server, DDEV upload_dirs and the selected release.' \
-            'Any database imported by this pull stays in place. After fixing the cause, repeat the same pull with --skip-db (keep the selected host).' >&2
+        printf '  [FAIL] Remote file preflight failed (%s s, exit %s).\n' "$((SECONDS - started))" "$status" >&2
+        printf '%s\n' '  No upload directories have been mirrored in this step.' \
+            '  Check rsync on the server, DDEV upload_dirs and the selected release.' >&2
+        report_file_recovery 'https://github.com/ErHaWeb/ddev-typo3-deployer-pull#troubleshooting'
         exit "$status"
     }
     log_success "Remote upload directories verified" "$started"
@@ -243,30 +258,55 @@ validate_dump() {
         || die "The dump is incomplete or contains unexpected output. The database has not been imported."
 }
 
-# Keep ordinary rsync errors visible, but group repeated filename diagnostics.
+# Group filename diagnostics, retaining the exact original stderr whenever
+# the console uses a compact representation. Do not infer the original name
+# from rsync's temporary filename or its escaped byte sequences.
 report_rsync_errors() {
-    local line count=0 limit=3
+    local line sample count=0 limit=3 destination=$2 label=diagnostics
+    local -a examples=()
     while IFS= read -r line || [[ -n "$line" ]]; do
         case "$line" in
             rsync:*'Illegal byte sequence'*)
                 count=$((count + 1))
-                ((count <= limit)) || continue
+                if ((count <= limit)); then
+                    sample=$line
+                    case "$line" in
+                        *'mkstemp "'*'" failed: Illegal byte sequence'*)
+                            sample=${line#*'mkstemp "'}
+                            sample=${sample%'" failed: Illegal byte sequence'*}
+                            sample=${sample#"$destination/"}
+                            ;;
+                    esac
+                    if ((${#sample} > 120)); then
+                        sample="${sample:0:117}..."
+                    fi
+                    examples+=("$sample")
+                fi
                 ;;
+            *) printf '%s\n' "$line" >&2 ;;
         esac
-        printf '%s\n' "$line" >&2
     done < "$1"
     if ((count > 0)); then
-        printf '\nFilename encoding: %s rsync diagnostics. The receiving filesystem may reject non-UTF-8 filenames from the server.\n' "$count" >&2
-        if ((count > limit)); then
-            printf 'Showing the first %s filename encoding diagnostics; %s more omitted.\n' "$limit" "$((count - limit))" >&2
-            printf 'Complete rsync error log: %s (may contain sensitive filenames; remove when no longer needed).\n' "$1" >&2
-            keep_error_log=1
+        if ((count == 1)); then
+            label=diagnostic
         fi
+        printf '\n  [WARN] Filename encoding: %s rsync %s (Illegal byte sequence).\n' "$count" "$label" >&2
+        printf '%s\n' '  The receiving filesystem may reject non-UTF-8 filenames from the server.' \
+            '  Examples (rsync paths may include temporary filenames):' >&2
+        printf '    %s\n' "${examples[@]}" >&2
+        if ((count > limit)); then
+            printf '    ... %s more diagnostics omitted.\n' "$((count - limit))" >&2
+        fi
+        printf '  Complete rsync error log: %s\n' "$1" >&2
+        printf '%s\n' '  The log may contain sensitive filenames; remove it when no longer needed.' >&2
+        keep_error_log=1
+        has_encoding_errors=1
     fi
 }
 
 mirror_upload_directory() (
-    local destination error_log status keep_error_log=0 started=$SECONDS
+    local destination error_log status keep_error_log=0 has_encoding_errors=0 started=$SECONDS
+    local completed=$2 total=$3 documentation='https://github.com/ErHaWeb/ddev-typo3-deployer-pull#troubleshooting'
     # Assign first: a failed substitution inside cd would leave cd at "".
     destination=$(resolve_upload_directory "$1") || exit 1
     cd -P -- "$destination"
@@ -278,11 +318,18 @@ mirror_upload_directory() (
     rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ --exclude=node_modules/ -e "ssh ${ssh_options[*]}" \
         -- "$ssh_host:$deploy_path/current/$1/" ./ 2>"$error_log" || {
         status=$?
-        report_rsync_errors "$error_log"
+        report_rsync_errors "$error_log" "$destination"
         explain_status_255 "$status"
-        printf '%s\n' "The mirror of $1 may be incomplete. Any database imported by this pull stays in place." \
-            "See rsync troubleshooting (including filename encoding errors): https://github.com/ErHaWeb/ddev-typo3-deployer-pull#troubleshooting" \
-            "After fixing the cause above, repeat the same pull with --skip-db if the database is still current (keep the selected host)." >&2
+        if ((has_encoding_errors)); then
+            documentation='https://github.com/ErHaWeb/ddev-typo3-deployer-pull#filename-encoding-errors-on-macos'
+        fi
+        printf '\n  File synchronization incomplete\n  [FAIL] %s (%s s, exit %s)\n' "$1" "$((SECONDS - started))" "$status" >&2
+        printf '  Completed upload directories: %s of %s.\n' "$completed" "$total" >&2
+        printf '%s\n' "  The mirror of $1 may be incomplete." >&2
+        if ((total - completed > 1)); then
+            printf '  Remaining upload directories not attempted: %s.\n' "$((total - completed - 1))" >&2
+        fi
+        report_file_recovery "$documentation"
         exit "$status"
     }
     cat "$error_log" >&2
@@ -376,8 +423,11 @@ case "${1:-}" in
             exit 0
         fi
         check_remote_upload_directories
+        completed=0
+        total=${#upload_directories[@]}
         for directory in ${upload_directories[@]+"${upload_directories[@]}"}; do
-            mirror_upload_directory "$directory"
+            mirror_upload_directory "$directory" "$completed" "$total"
+            completed=$((completed + 1))
         done
         ;;
     *)

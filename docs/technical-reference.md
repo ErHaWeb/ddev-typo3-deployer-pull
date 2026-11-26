@@ -116,10 +116,17 @@ Files absent upstream are deleted. `_processed_/`, `_temp_/` and
 
 Each rsync transfer captures stderr in a private temporary file. On failure,
 repeated `Illegal byte sequence` diagnostics are counted, with at most three
-examples printed; unrelated diagnostics and the original exit status are
-preserved. The complete log is retained only when diagnostics are omitted.
-The pull still stops at the first failed directory, rather than starting
-further destructive transfers after an error.
+compact examples printed (relative to the local destination where possible,
+limited to 120 characters); unrelated diagnostics and the original exit
+status are preserved. Examples may contain rsync temporary filenames. The
+complete stderr log is retained whenever filename diagnostics are summarized,
+even for a single occurrence. The pull still stops at the first failed
+directory, rather than starting further destructive transfers after an error.
+The summary reports the failed directory, elapsed time, exit status, number
+of completed directories and any unattempted directories. Remote preflight
+failures also include a retry command. The command keeps the selected host
+and uses `--skip-db` only if the local database is still current. No status
+is inferred about earlier database steps.
 
 ### Diagnosing filename encoding errors
 

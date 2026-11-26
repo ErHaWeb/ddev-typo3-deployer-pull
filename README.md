@@ -287,11 +287,16 @@ properly encoded. Rsync displays some bytes using octal escapes such as
 
 Exit code 23 is a general partial-transfer error, not proof of an encoding
 problem. Repeated `Illegal byte sequence` diagnostics are grouped: the pull
-shows their total count and up to three examples, while other rsync errors
-remain visible. If more examples are omitted, the complete stderr log is
-retained in a private temporary file and its path is displayed. It may
-contain sensitive filenames; delete it when no longer needed. This changes
-only the reporting, not the transfer or its exit status.
+shows their total count and up to three compact examples, with local path
+prefixes removed where possible. These may be rsync temporary filenames,
+not the original names. Other rsync errors remain visible. Whenever filename
+diagnostics are summarized, the complete stderr log is retained in a private
+temporary file and its path is displayed. It may contain sensitive filenames;
+delete it when no longer needed. The failure summary shows the elapsed time,
+exit status, completed upload directories and a retry command for the same
+host. It does not claim that a database was imported, as the database step
+may have been skipped. This changes only the reporting, not the transfer or
+its exit status.
 
 A failed transfer can leave the local files partly synchronized.
 The add-on deliberately does not guess the encoding, rename files, silently
