@@ -1,316 +1,288 @@
 # TYPO3 Deployer Pull for DDEV
 
-Refresh a local TYPO3 database and upload directories from an active Deployer
-release with `ddev pull typo3-deployer`. Deployer itself does not run the pull;
-the provider uses its deployment layout. The provider runs on the host and
-uses your existing SSH configuration, agent and host-key checks. Database pulls use
-TYPO3 Console and the remote application's existing database connection;
-no separate database credentials or provider-specific API are required by
-this add-on.
+Bring your local TYPO3 development environment up to date with the database
+and uploaded files of a production or staging website:
+
+```bash
+ddev pull typo3-deployer
+```
+
+This add-on is for Composer-based TYPO3 websites deployed with [Deployer](https://deployer.org/).
+It uses your existing SSH connection and TYPO3's own database configuration.
+You do not need separate database credentials, a local Deployer installation
+or a hosting provider API. The add-on pulls data, not application code, and
+does not push changes back to the server.
 
 > [!WARNING]
-> **Use this add-on at your own risk. A pull can permanently destroy local data.**
-> It replaces the local database and mirrors the configured upload directories.
-> Local uploads and edits can be overwritten or deleted. Verify the upstream
-> host and local project. Back up the database and upload directories first.
+> A pull replaces your **local database** and can overwrite or delete **local
+> uploaded files**. Back up both before pulling. The add-on does not create
+> backups or anonymize production data. Only pull data you are authorized to
+> use locally.
 
-## Install, update and remove
+## Requirements
 
-Use DDEV 1.25.0 or later. Install or update to the latest stable GitHub
-release from your DDEV project directory.
+| Where | What you need |
+| --- | --- |
+| Local computer | [DDEV](https://ddev.com/) 1.25.0 or later, Bash, OpenSSH and rsync |
+| Local project | A Composer-based DDEV project of type `typo3` with compatible PHP and MySQL/MariaDB versions |
+| Deployment server | A Deployer release accessible via SSH, with rsync for file pulls and a compatible MySQL/MariaDB dump client for database pulls |
+| Database pulls | [TYPO3 Console](https://github.com/TYPO3-Console/typo3_console) 8 or 9, installed locally and in the remote release |
+
+DDEV supplies the YAML parser (`yq`); no separate installation is needed.
+
+## Quick start
+
+Run these commands from the root of your local DDEV project.
+
+### 1. Install the add-on
 
 ```bash
 ddev add-on get ErHaWeb/ddev-typo3-deployer-pull
+ddev restart
 ```
 
-To install a specific release, pass its tag.
+### 2. Check TYPO3 Console
 
-```bash
-ddev add-on get ErHaWeb/ddev-typo3-deployer-pull --version v3.0.0
-```
-
-Use `--version main` to try the current development branch. Commit the
-installed files and the generated add-on manifest to share the installation
-with your team.
-
-To uninstall, run `ddev add-on remove typo3-deployer-pull`.
-
-DDEV replaces or removes installed files that still contain
-`#ddev-generated`. Remove that marker from each file you customize to keep
-your changes during updates and removal. The provider YAML calls the
-installed helper script. Keep both files together if you want an independent
-copy. If you already have a standalone `.ddev/providers/typo3-deployer.yaml`,
-save it outside that directory before installing. DDEV preserves it in place
-until you move it.
-
-## Configure the project
-
-- Use a DDEV project of type `typo3`, with TYPO3 Console
-  (`helhum/typo3-console` 8 or 9) locally and remotely for database pulls.
-  Match the local database engine and version to the server.
-- The host needs Bash, OpenSSH and rsync. The provider reads `.hosts.yml`
-  with the `yq` of the DDEV web container, so nothing else is installed.
-  The server needs rsync and a dump client usable by TYPO3 Console.
-
-### Why TYPO3 Console is required
-
-TYPO3 Console (`helhum/typo3-console`) enables database pulls without
-separately configuring database credentials in the provider. The add-on
-uses the existing SSH connection to run the TYPO3 CLI on the deployment
-server. TYPO3 Console uses the database connection settings resolved by
-TYPO3 at runtime, regardless of whether the project configures them through
-PHP configuration files or environment variables.
-
-The provider does not read or transfer database credentials, maintain a
-separate `.my.cnf`, or depend on a hosting provider's API. The existing
-TYPO3 installation remains the single source of truth for database access.
-This follows Convention over Configuration and separation of concerns:
-OpenSSH authenticates access to the server, TYPO3 provides the database
-connection settings, and TYPO3 Console handles the database export.
-A compatible MySQL or MariaDB dump client must still be available remotely.
-
-TYPO3 Console extends the native TYPO3 CLI with the two database commands
-used by this provider:
-
-- **Remote:** [`database:export`](https://docs.typo3.org/p/helhum/typo3-console/main/en-us/CommandReference/DatabaseExport.html)
-  exports the `Default` database connection using TYPO3's resolved connection
-  settings and allows the provider to exclude volatile tables such as caches
-  and sessions. TYPO3 Core's `impexp:export` exports records, not a complete
-  SQL database dump, and is not a substitute for this command.
-- **Local:** [`database:updateschema safe`](https://docs.typo3.org/p/helhum/typo3-console/main/en-us/CommandReference/DatabaseUpdateschema.html)
-  reconciles the imported database with the local code using add/change
-  operations, without explicit rename/drop operations. It does not initialize
-  extensions. The native `extension:setup` command also performs other setup
-  operations, such as static data imports, which are outside the scope of a pull.
-
-The native TYPO3 Core command `cache:flush` clears local caches after the
-schema update; it does not require TYPO3 Console. Files-only pulls do not
-need either database command.
-
-If TYPO3 Console is missing, add it to the project's Composer dependencies
-using the version compatible with its TYPO3 installation:
+For database pulls, make sure TYPO3 Console is installed in both the local
+project and the deployed website. If it is missing, add it as a regular
+Composer dependency (not a development-only dependency):
 
 ```bash
 ddev composer require helhum/typo3-console
 ```
 
-Keep it in `require`, not `require-dev`, so the remote release also includes
-it when deployed with `composer install --no-dev`. Deploy the updated
-Composer dependencies through your normal CI pipeline. Local and remote
-installations can use different compatible versions of TYPO3 Console.
+Deploy the updated Composer dependencies through your normal deployment
+process before pulling the database. Choose a version compatible with each
+TYPO3 installation. Files-only pulls do not need TYPO3 Console.
 
-### Deployer host configuration
+### 3. Check your Deployer host configuration
 
-The provider reads the Deployer hosts from `.hosts.yml` in the project root,
-the file your `deploy.php` imports. Deployer itself only runs in CI and is
-not needed locally. YAML anchors, aliases and merge keys work as in
-Deployer, including hidden template hosts such as `.base`:
+The add-on reads `.hosts.yml` from the project root. Reuse your existing
+file; no duplicate provider configuration is needed. A minimal example:
 
 ```yaml
 hosts:
-  .base: &base
-    hostname: deploy.example.invalid
-    remote_user: deploy
-    port: 2222
   production:
-    <<: *base
+    hostname: deploy.example.com
+    remote_user: deploy
     deploy_path: /srv/example/production
-  staging:
-    <<: *base
-    deploy_path: /srv/example/staging
 ```
 
-It uses these settings of the selected host:
+Replace the example values with your own. `deploy_path` is the directory
+containing Deployer's `current` link, not `current` itself.
 
-- `deploy_path` (required) and `hostname` (default: the host name, used
-  only for SSH configuration hints).
-- `remote_user` and `port` (default: whatever OpenSSH uses for that
-  project alias).
-- `bin/php` (optional). By default the provider invokes `vendor/bin/typo3`
-  directly, so the Composer binary's shebang selects the interpreter
-  (usually `#!/usr/bin/env php`, using the remote shell's `PATH`). Set
-  `bin/php` only if you need a specific PHP binary or flags, such as a custom
-  `php.ini`. `{{deploy_path}}` is resolved; other placeholders are refused.
-  The override runs in the remote shell as a trusted command, as in Deployer.
-  Deployer itself applies host settings the same way. The provider does not
-  read `deploy.php`.
+### 4. Check your SSH connection
 
-For a conventional setup, leave `bin/php` out of `.hosts.yml`. Verify the
-CLI in the same non-interactive SSH environment used by the provider:
+The add-on uses the **DDEV project name as the SSH alias**. Find the project
+name with `ddev describe` (or the `name` setting in `.ddev/config.yaml`).
+
+For a project named `example-typo3`, a typical entry in your local
+`~/.ssh/config` looks like this:
+
+```sshconfig
+Host example-typo3
+    HostName deploy.example.com
+    User deploy
+    IdentityFile ~/.ssh/example-deploy
+    IdentitiesOnly yes
+```
+
+Keep your working SSH configuration and key. The provider uses the local
+OpenSSH client, so `ddev auth ssh` is not required. Test the connection:
+
+```bash
+ssh example-typo3
+```
+
+Exit the remote shell before continuing. Check that the alias points to the
+intended server: the provider does not verify that a DNS name and an IP
+address in the two configuration files identify the same machine.
+
+### 5. Back up and pull
+
+A DDEV snapshot backs up the database, not uploaded files:
+
+```bash
+ddev snapshot
+```
+
+Make a separate backup of your upload directories outside the project and
+verify both backups can be restored. Then run:
+
+```bash
+ddev pull typo3-deployer
+```
+
+DDEV asks for confirmation in an interactive terminal. Before importing,
+the provider displays the selected host (default: `production`), effective
+SSH target and release path. It imports the database, updates the schema,
+clears local TYPO3 caches and then synchronizes the files.
+
+## Usage
+
+| Command | What it does |
+| --- | --- |
+| `ddev pull typo3-deployer` | Pull database and files from `production` |
+| `ddev pull typo3-deployer --environment=host=staging` | Use the `staging` host from `.hosts.yml` |
+| `ddev pull typo3-deployer --skip-files` | Pull only the database |
+| `ddev pull typo3-deployer --skip-db` | Pull only the files |
+| `ddev pull typo3-deployer --skip-files --skip-import` | Download and validate a SQL dump without importing it |
+
+Add `-y` only to skip confirmation. Non-interactive runs may also proceed
+without asking. With `--skip-import`, files are not downloaded because the
+provider mirrors them directly during import.
+
+### Select the uploaded files
+
+Normally there is nothing to configure: TYPO3 defaults to `fileadmin` in
+DDEV. To mirror additional upload directories, use DDEV's existing
+`upload_dirs` setting in `.ddev/config.yaml`:
+
+```yaml
+upload_dirs:
+  - fileadmin
+  - uploads
+  - ../private/uploads
+```
+
+Paths are relative to the document root (for example `public`). Each actual
+upload directory must exist locally and at the corresponding path in the
+remote release. Local files that are absent remotely are deleted. Generated
+`_processed_` and `_temp_` directories are excluded, as is `node_modules`
+(including DDEV entries used only for Mutagen performance).
+
+Do not list source code or other dependency directories as uploads. The
+project root, `.git`, `.ddev`, overlapping destinations and paths resolving
+outside the project are rejected. See the [technical reference](docs/technical-reference.md#file-synchronization)
+for path restrictions and details.
+
+### Choose another deployment environment
+
+Add further hosts to your existing `.hosts.yml`, for example `staging`.
+Hosts on the same SSH account can share the project alias and use different
+`deploy_path` values. If an environment uses another SSH account or server,
+use a separate DDEV project with its own matching SSH alias.
+
+YAML anchors and merge keys are supported. See the
+[configuration reference](docs/technical-reference.md#deployer-host-settings)
+for an example.
+
+### Use a specific remote PHP version (only if needed)
+
+By default, the provider executes `vendor/bin/typo3` directly on the remote
+server. The server's CLI environment selects PHP; the local DDEV PHP version
+is independent. To check the version in the same kind of SSH session used
+by the provider, adapt this command to your project:
 
 ```bash
 ssh -T -o RemoteCommand=none example-typo3 \
   'cd /srv/example/production/current && vendor/bin/typo3 --version'
 ```
 
-The PHP version and configuration on the remote server must meet the
-requirements of that release. A working interactive login does not guarantee
-that the non-interactive shell has the same `PATH` or PHP configuration.
-If the direct invocation fails, fix the server's CLI environment or set the
-optional override. A project that needs additional PHP flags can, for example,
-use `bin/php: '/usr/bin/php8.5-cli -c {{deploy_path}}/shared/php-cli.ini'`.
-The local DDEV PHP version is independent of the remote CLI.
-
-SSH and rsync connect using the existing alias named after the DDEV project
-(`DDEV_PROJECT`). OpenSSH resolves the hostname, user, port, keys, proxies
-and host key checks from `~/.ssh/config` and the agent. For example, for a
-DDEV project named `example-typo3`:
-
-```sshconfig
-Host example-typo3
-    HostName deploy.example.invalid
-    User deploy
-    Port 2222
-    IdentityFile ~/.ssh/example-deploy
-    IdentitiesOnly yes
-```
-
-The provider uses `ssh -G` to read the effective SSH configuration and
-compare any explicitly configured `remote_user` and `port` with the selected
-Deployer host before exporting or mirroring. A user or port mismatch stops
-the pull. Hostnames are not compared or resolved by the provider: the SSH
-alias may use a DNS name while `.hosts.yml` uses an IP address, or vice versa.
-OpenSSH remains responsible for the connection and host-key verification.
-The project alias must point to the intended deployment server; the provider
-does not verify that both hostnames identify the same server. There is no
-direct-connection fallback. Hosts sharing the same SSH target can use the
-same alias with different `deploy_path` values. For different SSH targets,
-use separate DDEV projects with their own existing aliases.
-
-`deploy_path` and the upload directories reach the remote shell unquoted,
-because openrsync drops quotes. They may only contain letters, digits and
-`._/@+=,-`, without empty, `.` or `..` segments. `hostname`, `remote_user`
-and `port` must not contain whitespace.
-
-For database pulls, `<deploy_path>/current` must contain the TYPO3 Composer
-CLI at `vendor/bin/typo3` (executable when no `bin/php` override is set).
-For file pulls it must contain the upload directories at the same paths
-relative to the project root as in DDEV. The provider mirrors DDEV's effective `upload_dirs`, except directories
-named `node_modules`. TYPO3 defaults to
-`fileadmin` when no custom list is configured. To also mirror `uploads`,
-configure both directories in `.ddev/config.yaml`:
+If the default PHP is incompatible or you need custom PHP flags, add the
+optional `bin/php` setting to the relevant host in `.hosts.yml`:
 
 ```yaml
-upload_dirs:
-  - fileadmin
-  - uploads
+hosts:
+  production:
+    hostname: deploy.example.com
+    remote_user: deploy
+    deploy_path: /srv/example/production
+    bin/php: '/usr/bin/php8.5-cli -c {{deploy_path}}/shared/php-cli.ini'
 ```
 
-DDEV resolves these paths relative to the docroot. Each local destination
-must already exist and resolve to a directory inside the project that does
-not overlap with another upload directory. The project root and project
-metadata directories `.git` and `.ddev` (including symlinks into them) are
-not valid upload destinations. Do not list local source or dependency
-directories as uploads, other than the documented `node_modules` exception.
+Use a binary and flags that actually exist on your server. Leave this
+setting out when the direct CLI invocation works. The provider does not
+execute or parse `deploy.php`.
 
-DDEV also uses `upload_dirs` to exclude directories from Mutagen syncing.
-Entries named `node_modules` (for example `../node_modules` with a `public`
-docroot) are skipped automatically, even if they do not exist on the server.
-Nested `node_modules` directories within mirrored uploads are also excluded
-from transfer and deletion. Other upload directories, including those outside
-the docroot, are still mirrored. If only `node_modules` entries are configured,
-the files step is a no-op.
+## Troubleshooting
 
-## Use
+Read the first underlying error in the output; the final `Pull failed` line
+is usually just a summary.
 
-### Before you pull
+| Problem | What to check |
+| --- | --- |
+| SSH authentication or connection fails | Test `ssh <DDEV-project-name>`; check your key, network and host key. |
+| SSH alias does not match the selected host | Compare the effective SSH user and port (`ssh -G <alias>`) with `remote_user` and `port` in `.hosts.yml`. Different DNS names and IP spellings are allowed; keep your working `HostName` and key. |
+| Host or deployment path is invalid | Check the selected host and its absolute `deploy_path` in the project-root `.hosts.yml`. |
+| Remote PHP version is incompatible | Run the remote CLI check above; configure `bin/php` only if needed. Exit status 255 alone does not prove an SSH error. |
+| `database:export` is unavailable | Install and deploy TYPO3 Console on the remote website. Check the remote CLI and dump client. |
+| `database:updateschema` is unavailable | Repair the local Composer installation and install compatible TYPO3 Console. The provider stops before replacing the database. |
+| An upload directory is missing | Check DDEV's `upload_dirs` and the selected remote release. Create the correct local directory or fix the deployment. |
+| `rsync` is missing | Install it on the local computer or deployment server, as indicated by the error. |
+| A dump already exists | Save or remove it securely before retrying. |
+| Database dump is incomplete | Check remote CLI output and the connection. The provider rejects incomplete dumps before import. |
+| File synchronization fails | The database may already have been replaced. Fix the cause and retry the same host with `--skip-db`; restore from backup if needed. |
+| Import or schema/cache update fails | Check the reported phase. The local database may be incomplete or not fully prepared. Save any needed dump before retrying and restore from backup if necessary. |
 
-- **Verify the local project and the upstream host.** The default upstream
-  host is `production`. Use this add-on in disposable development environments.
-- **Back up the database and upload directories separately.** A DDEV snapshot
-  covers the database. Keep a separate copy of the upload directories outside
-  the project and verify that both backups can be restored. See [DDEV database snapshots](https://docs.ddev.com/en/stable/users/usage/database-management/#snapshots).
-- **Plan for partial failure.** The database is replaced before files are
-  mirrored. A failed import can leave an incomplete database. An interrupted
-  file transfer can leave the new database paired with partly updated or
-  deleted files. Recover local changes from your backups.
-- **Check automation.** `-y` skips confirmation. Non-interactive runs can
-  also proceed without prompting.
-- **Protect production data.** Dumps and uploads may contain personal or
-  confidential information. Pull only data you are authorized to store and
-  use locally, and restrict access to the copies and backups.
+Keep any needed SQL dump (`.ddev/.downloads/db.sql`) securely outside DDEV's
+downloads directory before retrying. Do not commit dumps or uploads to Git.
 
-### Pull commands
+## Why TYPO3 Console?
+
+TYPO3 Console makes the database pull possible **without separately
+configuring database credentials**. It uses the connection already resolved
+by the remote TYPO3 installation, whether configured through PHP files or
+environment variables. The provider does not read or transfer those
+credentials itself.
+
+- [`database:export`](https://docs.typo3.org/p/helhum/typo3-console/main/en-us/CommandReference/DatabaseExport.html)
+  exports the `Default` connection and allows volatile tables such as caches
+  and sessions to be excluded.
+- [`database:updateschema safe`](https://docs.typo3.org/p/helhum/typo3-console/main/en-us/CommandReference/DatabaseUpdateschema.html)
+  aligns the imported database with the local code using add/change schema
+  operations, without explicit rename/drop operations.
+
+TYPO3 Core's `impexp:export` is not a full SQL dump. Its `extension:setup`
+command performs additional initialization beyond the schema update. The
+provider deliberately avoids those side effects, and uses the native
+`cache:flush` command to clear local caches after the schema update.
+
+## Security and limitations
+
+- A pull is not atomic. A successful database import can be followed by a
+  failed file transfer. Backups remain your responsibility.
+- Restrict access to local copies and backups of production data.
+- Only the `Default` database connection is exported. Upgrade wizards and
+  extension initialization are not run automatically.
+- Avoid pulling during a deployment that changes the `current` release.
+- DDEV's preflight does not receive skip flags, so local rsync and valid
+  configured upload destinations are required even for database-only pulls.
+
+See the [technical reference](docs/technical-reference.md) for details.
+
+## Update or uninstall
 
 ```bash
-ddev pull typo3-deployer                               # Production, prompts in an interactive terminal
-ddev pull typo3-deployer --environment=host=staging    # Select another Deployer host
-ddev pull typo3-deployer -y                            # Accept replacement without prompting
-ddev pull typo3-deployer --skip-files                  # Database only
-ddev pull typo3-deployer --skip-db                     # Files only
-ddev pull typo3-deployer --skip-files --skip-import    # Fetch and validate a dump without importing
+ddev add-on get ErHaWeb/ddev-typo3-deployer-pull
+ddev restart
 ```
 
-DDEV runs the preflight before anything else and does not tell it about
-skip flags. So it always requires rsync, a valid host in `.hosts.yml` and
-valid upload destinations. If the SSH configuration cannot be read, is
-incomplete, or has a user or port mismatch, the provider shows the `Host`
-block above with a placeholder for the key. Exit status 255 can indicate an
-SSH connection error or a failed remote command (including a PHP fatal error).
-Check the original error output; for a PHP error, verify the remote CLI
-PHP environment or optional `bin/php` in `.hosts.yml`. The remote CLI must
-provide `database:export` (normally from TYPO3 Console).
-The PHP version in the local DDEV container does not control the remote
-export. SSH disables a forced TTY and remote commands from `~/.ssh/config`.
-The export reads the `Default` connection and streams the dump over
-compressed SSH. Caches,
-sessions, `sys_log`, `sys_http_report` and `sys_file_processedfile` are
-excluded. Extra dump options belong in TYPO3 Console's configuration for
-`database:export`.
+Use `ddev add-on update` for installed add-ons, or `--version <tag>`
+with `ddev add-on get` for a specific release. To uninstall:
 
-The provider requires SSH to succeed and checks the dump's TYPO3 Console
-header and completion footer before import. These checks detect interrupted
-or contaminated streams. Import can still fail on SQL errors or an
-incompatible database. Before replacing the local database, the provider
-checks that the local TYPO3 CLI can provide `database:updateschema`.
-A local CLI that cannot bootstrap must be repaired first. The native Core
-command `cache:flush` needs no separate availability check. After import,
-the provider runs `database:updateschema safe` (add/change operations, not
-rename/drop) and the native `cache:flush`. It does not initialize extensions or run upgrade
-wizards. The dump is deleted after all three local steps succeed. Failed
-imports or post-import steps and `--skip-import` can leave a restricted-
-permission dump at `.ddev/.downloads/db.sql`. A failed export removes only the
-dump it created; the helper refuses to overwrite an existing dump. DDEV itself
-manages the downloads directory, so save any dump you need to keep outside it
-before another pull. Treat dumps and imported data as sensitive.
+```bash
+ddev add-on remove typo3-deployer-pull
+```
 
-Rsync mirrors content, timestamps and safe symlinks. It deletes local files
-absent upstream. It leaves `_processed_/`, `_temp_/` and `node_modules/` alone and uses local
-ownership and permission defaults. Run one pull at a time
-per project. The provider handles a single database connection and the
-upload directories listed by DDEV.
+Commit the installed add-on files and manifest to share the setup with your
+team. DDEV manages files marked `#ddev-generated`; see the
+[technical reference](docs/technical-reference.md#installed-files-and-customization)
+if you need to customize them.
 
-Before the first rsync, the files step checks that rsync is available remotely
-and all requested remote upload directories exist. This avoids starting a
-partial file mirror when a later source is already missing. Because DDEV's
-preflight has no skip flags and the files step runs after the database import,
-a remote file preflight failure can still leave the new local database in place.
-It does not block database-only pulls. If rsync fails, the provider shows its
-error, keeps its exit status and warns that the mirror may be incomplete.
-After resolving the error, use `--skip-db` to retry the files alone. A running
-pull is not atomic; avoid concurrent pulls and deployments that change the
-`current` symlink while pulling.
+## Platform support and development
 
-## Platform coverage
+Previous versions were tested on Apple Silicon macOS with OrbStack, DDEV
+1.25.0 and 1.25.6, GNU rsync and macOS openrsync. Linux and WSL2 are expected
+to work; native Windows with Git Bash usually lacks rsync and is unverified.
 
-Previous releases were tested on Apple Silicon macOS with OrbStack, DDEV
-1.25.0 and 1.25.6, Homebrew rsync and the macOS openrsync client. The smoke
-test uses a disposable project, a synthetic MySQL database, a local SSH
-stand-in and fixtures for TYPO3 Console. Run a fresh smoke test for changes
-with `bash tests/smoke.sh`. Set
-`TEST_RSYNC=/path/to/rsync` to test another rsync implementation.
+Run `bash tests/smoke.sh` for an isolated test without live server access.
+See [test details](docs/technical-reference.md#smoke-tests).
 
-Linux and WSL2 are expected to work with the required host tools. Native
-Windows with the standard Git Bash installation typically lacks rsync.
+## License
 
-## License and liability
-
-Created by [Eric Harrer](https://github.com/ErHaWeb).
-
-The add-on is licensed under the [GNU General Public License](LICENSE.txt),
-version 2 or any later version (`GPL-2.0-or-later`). The DDEV installation
-includes the license in `.ddev/typo3-deployer-pull/COPYING`. Keep the
-license and copyright notices with any copies you distribute.
-
+Created by [Eric Harrer](https://github.com/ErHaWeb). Licensed under the
+[GNU General Public License](LICENSE.txt), version 2 or later
+(`GPL-2.0-or-later`). Keep the license and copyright notices with copies.
 The warranty disclaimer and limitation of liability apply to the extent
 permitted by applicable law. Mandatory liability remains unaffected.
