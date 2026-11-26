@@ -108,11 +108,11 @@ get_addon "$@"
 
 # Fail rsync lookup with a private PATH, without modifying host executables.
 mkdir "$work/no-rsync"
-for program in ddev ssh awk sed tr head tail rm; do
+for program in ddev ssh; do
     ln -s "$(command -v "$program")" "$work/no-rsync/$program"
 done
 expect_failure 'Missing on this machine: rsync' env PATH="$work/no-rsync" \
-    DDEV_APPROOT="$PWD" DDEV_DOCROOT=public host=production \
+    DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" DDEV_DOCROOT=public host=production \
     /bin/bash .ddev/typo3-deployer-pull/pull.sh check
 
 # Run real rsync through a fixture-local SSH transport. Run real database imports
@@ -129,29 +129,20 @@ BASH
 cat >"$work/bin/ssh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "$1" == '-G' ]]; then
-    shift
-    if [[ "$1" == '-F' ]]; then
-        [[ "$2" == /dev/null ]]
-        printf 'hostname %s\nuser local-user\nport 22\nidentitiesonly no\n' "$TEST_PROJECT"
-    elif [[ "${TEST_SSH_CONFIG:-configured}" == defaults ]]; then
-        printf 'hostname %s\nuser local-user\nport 22\nidentitiesonly yes\n' "$TEST_PROJECT"
-    else
-        printf 'hostname %s\nuser deployment-user\nport 22\nidentitiesonly yes\n' "$TEST_PROJECT"
-    fi
+printf '%s\n' "$*" >>"$TEST_WORK/ssh.log"
+if [[ "$1" == -G ]]; then
+    [[ "$*" == "-G -T -o RemoteCommand=none -- $TEST_PROJECT" ]]
+    printf '%s\n' "hostname ${TEST_SSH_HOSTNAME:-deployment.example.invalid}" \
+        "user ${TEST_SSH_USER:-release}" "port ${TEST_SSH_PORT:-2222}" \
+        'identityfile ~/.ssh/fixture-key' 'identitiesonly yes'
     exit 0
 fi
 [[ "$1 $2 $3" == '-T -o RemoteCommand=none' ]]
 shift 3
-if [[ "$1" == '-C' ]]; then
-    shift
-fi
-if [[ "$1" == '--' ]]; then
-    shift
-fi
+[[ "$1" != -C ]] || shift
+[[ "$1" != -- ]] || shift
 [[ "$1" == "$TEST_PROJECT" && "$#" -ge 2 ]]
 shift
-touch "$TEST_WORK/ssh-connection"
 exec /bin/sh -c "$*"
 BASH
 cat >"$work/bin/rsync" <<'BASH'
@@ -199,8 +190,24 @@ fi
 BASH
 done
 
-printf 'hosts:\r\n  production:\r\n    deploy_path: "%s/production"\r\n  staging:\r\n    deploy_path: %s/staging # fixture\r\n' "$work" "$work" >.hosts.yml
-printf "set('bin/php', '{{deploy_path}}/bin/php -d memory_limit=128M');\r\n" >deploy.php
+sed 's/$/\r/' >.hosts.yml <<YAML
+hosts:
+  .base: &base
+    remote_user: deploy
+    port: 2222
+    hostname: deployment.example.invalid
+    bin/php: '{{deploy_path}}/bin/php -d memory_limit=128M'
+  production:
+    remote_user: release
+    <<: *base
+    hostname: "deployment.example.invalid"
+    deploy_path: "$work/production"
+  staging:
+    <<: *base
+    remote_user: release
+    deploy_path: $work/staging/ # fixture
+YAML
+printf "set('bin/php', '/deploy.php/is/not/read');\n" >deploy.php
 
 "$TEST_DDEV" start
 pull() {
@@ -219,18 +226,12 @@ touch "$fileadmin/local-only"
 mkdir -p "$fileadmin/_processed_" "$fileadmin/_temp_"
 touch "$fileadmin/_processed_/keep" "$fileadmin/_temp_/keep"
 
-echo 'Testing SSH defaults without a deployment destination or identity'
-TEST_SSH_CONFIG=defaults expect_failure 'SSH has no deployment destination or identity configured' pull -y
-grep -F "Host $TEST_PROJECT" "$work/failure.log"
-test ! -e "$work/ssh-connection"
-test ! -e "$work/typo3.log"
-test -f "$fileadmin/local-only"
-
 echo 'Testing DDEV confirmation, combined pull, host override, skip flags and file mirroring'
 if printf 'n\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer >"$work/confirm.log" 2>&1; then
     fail 'the pull should be cancelled when the user declines'
 fi
 grep -F 'Pull cancelled' "$work/confirm.log"
+test ! -e "$work/ssh.log"
 test ! -e "$work/typo3.log"
 test -f "$fileadmin/local-only"
 printf 'y\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer
@@ -245,9 +246,13 @@ test ! -e "$fileadmin/_temp_/from-server"
 test ! -e "$dump"
 printf '%s\n' 'typo3 database:updateschema *.add,*.change' 'typo3 cache:flush' >"$work/expected-cli.log"
 cmp "$work/expected-cli.log" "$work/typo3.log"
+# The explicit remote_user wins over the merge key, as in the YAML spec.
+grep -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/production/current && $work/production/bin/php -d memory_limit=128M vendor/bin/typo3" "$work/ssh.log"
+grep -F -- "-T -o RemoteCommand=none $project rsync --server" "$work/ssh.log"
 
 pull --skip-files --environment=host=staging --skip-confirmation
 check_db staging
+grep -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/staging/current &&" "$work/ssh.log"
 [[ "$(cat "$fileadmin/from-server")" == production ]]
 pull --skip-db --environment=host=staging -y
 check_db staging
@@ -269,9 +274,20 @@ check_db staging
 echo 'Testing failure paths before local changes'
 TEST_DUMP=noisy expect_failure 'dump is incomplete' pull -y
 TEST_DUMP=truncated expect_failure 'dump is incomplete' pull -y
-TEST_DUMP=ssh-error expect_failure 'The SSH session for' pull -y
+TEST_DUMP=ssh-error expect_failure "SSH to '$project' (Deployer host 'production') failed" pull -y
+grep -F 'IdentityFile ~/.ssh/<deployment-key>' "$work/failure.log"
+grep -F 'IdentitiesOnly yes' "$work/failure.log"
+grep -F "Host $project" "$work/failure.log"
 grep -E 'exit status 255$' "$work/failure.log"
-expect_failure 'No usable deploy_path' pull --environment=host=invalid -y
+# Wrong effective targets must stop before any remote transfer or local import.
+remote_calls_before=$(grep -c '^-T ' "$work/ssh.log")
+for mismatch in TEST_SSH_HOSTNAME=wrong.example.invalid TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
+    expect_failure "SSH alias '$project' does not match Deployer host 'production'" env "$mismatch" "$TEST_DDEV" pull deployer -y
+    grep -F "Host $project" "$work/failure.log"
+done
+[[ "$(grep -c '^-T ' "$work/ssh.log")" == "$remote_calls_before" ]]
+expect_failure "No absolute deploy_path for host 'invalid'" pull --environment=host=invalid -y
+expect_failure "No absolute deploy_path for host '.base'" pull --environment=host=.base -y
 check_db staging
 [[ "$(cat "$fileadmin/from-server")" == staging ]]
 mv "$fileadmin" "$work/outside"
@@ -314,10 +330,10 @@ check_db production
 test ! -e public/uploads/local-only
 test ! -e shared-uploads/local-only
 
-# openrsync drops the quotes of --rsync-path, so whitespace is refused early.
+# Remote paths reach the remote shell unquoted, so they are refused early.
 mkdir 'shared uploads'
 printf 'upload_dirs:\n  - fileadmin\n  - "../shared uploads"\n' >.ddev/config.uploads.yaml
-expect_failure "DDEV upload directory 'shared uploads' must not contain whitespace" pull --environment=host=staging -y
+expect_failure "Remote path 'shared uploads' may only contain" pull --environment=host=staging -y
 check_db production
 rmdir 'shared uploads'
 cat >.ddev/config.uploads.yaml <<'YAML'
@@ -336,10 +352,10 @@ rm public/uploads
 mv "$work/outside-uploads" public/uploads
 rm .ddev/config.uploads.yaml
 
-echo 'Testing an empty docroot and PHP fallback'
+echo 'Testing an empty docroot and the php default without bin/php'
 mkdir -p "$work/production/current/fileadmin" fileadmin
 touch "$work/production/current/fileadmin/root-docroot"
-: >deploy.php
+printf 'hosts:\n  production:\n    hostname: deployment.example.invalid\n    deploy_path: %s/production\n' "$work" >.hosts.yml
 ln -s "$work/production/bin/php" "$work/bin/php"
 "$TEST_DDEV" config --docroot=''
 printf '<?php echo "fixture";\n' >index.php

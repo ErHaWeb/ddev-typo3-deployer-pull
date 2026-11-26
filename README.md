@@ -44,42 +44,68 @@ until you move it.
 - Use a DDEV project of type `typo3`, with TYPO3 Console
   (`helhum/typo3-console` 8 or 9) locally and remotely. Match the local
   database engine and version to the server.
-- The host needs Bash, OpenSSH, rsync and the standard
-  `awk`, `sed`, `tr`, `head`, `tail` and `rm` tools.
+- The host needs Bash, OpenSSH and rsync. The provider reads `.hosts.yml`
+  with the `yq` of the DDEV web container, so nothing else is installed.
   The server needs rsync and a dump client usable by TYPO3 Console.
-- Add an SSH alias named after the DDEV project. All environments in the
-  example use that same SSH account.
+
+The provider reads the Deployer hosts from `.hosts.yml` in the project root,
+the file your `deploy.php` imports. Deployer itself only runs in CI and is
+not needed locally. YAML anchors, aliases and merge keys work as in
+Deployer, including hidden template hosts such as `.base`:
+
+```yaml
+hosts:
+  .base: &base
+    hostname: deploy.example.invalid
+    remote_user: deploy
+    port: 2222
+    bin/php: /usr/bin/php8.4 -d memory_limit=1024M
+  production:
+    <<: *base
+    deploy_path: /srv/example/production
+  staging:
+    <<: *base
+    deploy_path: /srv/example/staging
+```
+
+It uses these settings of the selected host, with Deployer's defaults:
+
+- `deploy_path` (required) and `hostname` (default: the host name).
+- `remote_user` and `port` (default: whatever OpenSSH uses for that
+  project alias).
+- `bin/php` (default: `php`). `{{deploy_path}}` is resolved, other
+  placeholders are refused. It runs in the remote shell as a trusted command,
+  as in Deployer. The provider does not read `deploy.php`: if you set
+  `bin/php` there with `set()`, move it to `.hosts.yml`, for all hosts at
+  once through a template like `.base` above. Deployer applies host
+  settings the same way.
+
+SSH and rsync connect using the existing alias named after the DDEV project
+(`DDEV_PROJECT`). OpenSSH resolves the hostname, user, port, keys, proxies
+and host key checks from `~/.ssh/config` and the agent. For example, for a
+DDEV project named `example-typo3`:
 
 ```sshconfig
 Host example-typo3
     HostName deploy.example.invalid
     User deploy
-    Port 22
-    IdentityFile ~/.ssh/example-typo3
+    Port 2222
+    IdentityFile ~/.ssh/example-deploy
     IdentitiesOnly yes
 ```
 
-Add your Deployer hosts in the project root. The provider reads this
-conventional layout with two spaces for host names and four for
-`deploy_path`. Use a single path without whitespace. Plain, single-quoted
-and double-quoted paths are supported. CRLF line endings are supported.
+The provider uses `ssh -G` to compare the effective hostname and any
+explicitly configured `remote_user` and `port` with the selected Deployer
+host before exporting or mirroring. Hostnames are compared as strings
+(case-insensitively), not by DNS resolution. A mismatch stops the pull;
+there is no direct-connection fallback. Hosts sharing the same SSH target
+can use the same alias with different `deploy_path` values. For different
+SSH targets, use separate DDEV projects with their own existing aliases.
 
-```yaml
-hosts:
-  production:
-    deploy_path: /srv/example/production
-  staging:
-    deploy_path: /srv/example/staging
-```
-
-In `deploy.php` the provider recognizes an unindented assignment of a single
-PHP command with optional flags. It substitutes `{{deploy_path}}` and falls
-back to `php` when the assignment is absent. The configured command runs
-in the remote shell, so use trusted project configuration.
-
-```php
-set('bin/php', '{{deploy_path}}/bin/php -d memory_limit=128M');
-```
+`deploy_path` and the upload directories reach the remote shell unquoted,
+because openrsync drops quotes. They may only contain letters, digits and
+`._/@+=,-`, without empty, `.` or `..` segments. `hostname`, `remote_user`
+and `port` must not contain whitespace.
 
 Each `<deploy_path>/current` must have `vendor/bin/typo3` and the upload
 directories at the same paths relative to the project root as in DDEV.
@@ -94,8 +120,15 @@ upload_dirs:
 ```
 
 DDEV resolves these paths relative to the docroot. Each local destination
-must already exist and resolve to a distinct directory inside the project.
-Like `deploy_path`, upload directory paths must not contain whitespace.
+must already exist and resolve to a directory inside the project that does
+not overlap with another upload directory.
+
+### Migrate from 1.0
+
+- **SSH:** Keep the existing project alias and SSH configuration. The
+  provider now checks that the effective SSH target matches `.hosts.yml`.
+- **PHP:** 1.0 read `set('bin/php', ...)` from `deploy.php`. Move that value
+  to `bin/php` in `.hosts.yml`.
 
 ## Use
 
@@ -127,11 +160,11 @@ ddev pull deployer --skip-db                    # Files only
 ddev pull deployer --skip-files --skip-import   # Fetch and validate a dump without importing
 ```
 
-The preflight requires rsync and valid upload destinations even with skip flags.
-It checks the effective OpenSSH settings for the DDEV project name before
-connecting. If the destination and identity settings are all OpenSSH
-defaults, add or correct the matching `Host` entry in `~/.ssh/config`.
-SSH disables forced TTY and remote commands on the alias. The export reads the
+DDEV runs the preflight before anything else and does not tell it about
+skip flags. So it always requires rsync, a valid host in `.hosts.yml` and
+valid upload destinations. If SSH fails, the provider names the target and
+shows the `Host` block above with a placeholder for the key. SSH disables a
+forced TTY and remote commands from `~/.ssh/config`. The export reads the
 `Default` connection and streams the dump over compressed SSH. Caches,
 sessions, `sys_log`, `sys_http_report` and `sys_file_processedfile` are
 excluded. Extra dump options belong in TYPO3 Console's configuration for
@@ -157,10 +190,11 @@ warns that the mirror may be incomplete. After resolving the error, use
 
 ## Platform coverage
 
-Tested on Apple Silicon macOS with OrbStack, DDEV 1.25.0 and 1.25.6,
+Previous direct-connection version tested on Apple Silicon macOS with OrbStack, DDEV 1.25.0 and 1.25.6,
 Homebrew rsync and the macOS openrsync client. The smoke test uses a
 disposable project, a synthetic MySQL database, a local SSH stand-in and
-fixtures for TYPO3 Console. Run it with `bash tests/smoke.sh`. Set
+fixtures for TYPO3 Console. The alias-based revision requires a fresh DDEV
+smoke-test run. Run it with `bash tests/smoke.sh`. Set
 `TEST_RSYNC=/path/to/rsync` to test another rsync implementation.
 
 Linux and WSL2 are expected to work with the required host tools. Native

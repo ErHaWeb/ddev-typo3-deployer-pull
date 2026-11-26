@@ -7,7 +7,9 @@ set -euo pipefail
 
 cd -P -- "${DDEV_APPROOT:?Run this script through ddev pull deployer}"
 project_root=$PWD
-export host="${host:?No Deployer host selected}"
+host=${host:?No Deployer host selected}
+ssh_host=${DDEV_PROJECT:?No DDEV project selected}
+ssh_options=(-T -o RemoteCommand=none)
 dump=.ddev/.downloads/db.sql
 
 die() {
@@ -17,108 +19,116 @@ die() {
 
 check_programs() {
     local program missing=""
-    for program in ddev ssh rsync awk sed tr head tail rm; do
+    for program in ddev ssh rsync; do
         command -v "$program" >/dev/null || missing="$missing $program"
     done
     [[ -z "$missing" ]] || die "Missing on this machine:$missing. Nothing has been imported."
 }
 
+# Deployer runs only in CI. Read the selected host from .hosts.yml with the yq
+# of the DDEV web container, resolving anchors and merge keys as the YAML spec
+# and Deployer do, with Deployer's defaults for hostname and bin/php.
+read_deployment() {
+    local values
+    values=$(ddev exec --raw -- env "DEPLOYER_HOST=$host" yq --yaml-fix-merge-anchor-to-spec=true '
+        .hosts[strenv(DEPLOYER_HOST)]
+        | [.deploy_path, .hostname // strenv(DEPLOYER_HOST), .remote_user, .port, .["bin/php"] // "php"]
+        | map((. // "") | to_string | select(test("^[^\\x00-\\x1f\\x7f]*$")))
+        | select(length == 5) | .[]
+        ' /var/www/html/.hosts.yml) || die "Could not read .hosts.yml with the yq of the DDEV web container."
+    { IFS= read -r deploy_path && IFS= read -r ssh_hostname && IFS= read -r ssh_user &&
+        IFS= read -r ssh_port && IFS= read -r php_command; } <<< "$values" \
+        || die "The settings of host '$host' in .hosts.yml must be single-line values."
+    deploy_path=${deploy_path%/}
+    [[ "$deploy_path" == /?* ]] || die "No absolute deploy_path for host '$host' in .hosts.yml."
+    check_remote_path "$deploy_path"
+    # The deployment metadata is used to validate the effective SSH target.
+    [[ "$ssh_hostname$ssh_user$ssh_port" != *[[:space:]]* ]] \
+        || die "hostname, remote_user and port of host '$host' must not contain whitespace."
+    php_command=${php_command//\{\{deploy_path\}\}/"$deploy_path"}
+    [[ "$php_command" != *'{{'* ]] || die "bin/php of host '$host' may only use the placeholder {{deploy_path}}."
+}
+
+# Remote paths reach the remote shell unquoted, because openrsync drops quotes.
+check_remote_path() {
+    case "$1" in
+        *[!A-Za-z0-9._/@+=,-]*) die "Remote path '$1' may only contain letters, digits and ._/@+=,- characters." ;;
+    esac
+    case "/${1#/}/" in
+        */../*|*/./*|*//*) die "Remote path '$1' must not contain empty, . or .. segments." ;;
+    esac
+}
+
+explain_ssh_configuration() {
+    printf '%s\n' "Check the existing SSH alias in ~/.ssh/config:" "" \
+        "Host $ssh_host" \
+        "    HostName $ssh_hostname" \
+        "    User ${ssh_user:-<deployment-user>}" \
+        "    Port ${ssh_port:-22}" \
+        "    IdentityFile ~/.ssh/<deployment-key>" \
+        "    IdentitiesOnly yes" "" >&2
+}
+
+# Keep the project's SSH alias and let OpenSSH resolve all connection settings.
+# Only compare explicitly configured user/port; otherwise OpenSSH owns them.
 check_ssh_configuration() {
-    local configured defaults
-    # Ignore settings such as a global IdentitiesOnly policy that still leave
-    # the destination and identities at the OpenSSH defaults.
-    local ssh_fields='^(hostname|user|port|identityfile|identityagent|certificatefile|proxycommand|proxyjump|pkcs11provider|securitykeyprovider|hostkeyalias)$'
-
-    configured=$(ssh -G -T -o RemoteCommand=none -- "$DDEV_PROJECT" | awk -v fields="$ssh_fields" '$1 ~ fields') \
-        || die "Could not read SSH settings for '$DDEV_PROJECT'. Check ~/.ssh/config. The pull stopped before importing any data."
-    defaults=$(ssh -G -F /dev/null -T -o RemoteCommand=none -- "$DDEV_PROJECT" | awk -v fields="$ssh_fields" '$1 ~ fields') \
-        || die "Could not determine the OpenSSH defaults for '$DDEV_PROJECT'. The pull stopped before importing any data."
-
-    if [[ "$configured" == "$defaults" ]]; then
-        printf '%s\n' \
-            "SSH has no deployment destination or identity configured for DDEV project '$DDEV_PROJECT'." \
-            "Add or correct 'Host $DDEV_PROJECT' in ~/.ssh/config." \
-            "Set the deployment HostName, User and SSH key or agent settings." >&2
-        die "The pull stopped before importing any data."
+    local config key value rest hostname='' user='' port=''
+    if ! config=$(ssh -G "${ssh_options[@]}" -- "$ssh_host"); then
+        explain_ssh_configuration
+        die "Could not read the SSH configuration for '$ssh_host'."
+    fi
+    while read -r key value rest; do
+        case "$key" in
+            hostname) hostname=$value ;;
+            user) user=$value ;;
+            port) port=$value ;;
+        esac
+    done <<< "$config"
+    if [[ -z "$hostname" || -z "$user" || -z "$port" ]] \
+        || ! (shopt -s nocasematch; [[ "$hostname" == "$ssh_hostname" ]]) \
+        || [[ -n "$ssh_user" && "$user" != "$ssh_user" ]] \
+        || [[ -n "$ssh_port" && "$port" != "$ssh_port" ]]; then
+        printf '%s\n' "SSH alias '$ssh_host' does not match Deployer host '$host'." \
+            "Effective SSH target: $user@$hostname port $port" >&2
+        explain_ssh_configuration
+        die "The pull stopped before importing any data in this step."
     fi
 }
 
-read_deploy_path() {
-    awk '
-        { sub(/\r$/, "") }
-        /^[^ #]/ {
-            in_hosts = ($0 ~ /^hosts:[[:space:]]*(#.*)?$/)
-            selected = 0
-        }
-        in_hosts && /^  [^ #]/ {
-            name = $1
-            sub(/:$/, "", name)
-            hosts = hosts " " name
-            selected = (name == ENVIRON["host"])
-        }
-        selected && /^    deploy_path:[[:space:]]/ {
-            path = $2
-            if (NF > 2 && $3 !~ /^#/) {
-                print "deploy_path must be a single path without whitespace" > "/dev/stderr"
-                exit 1
-            }
-            if (path ~ /^".*"$/ || path ~ /^\047.*\047$/) {
-                path = substr(path, 2, length(path) - 2)
-            }
-            if (path != "" && path !~ /^#/) {
-                print path
-                found = 1
-            }
-            exit
-        }
-        END {
-            if (!found) {
-                print "No usable deploy_path for " ENVIRON["host"] " in .hosts.yml. Hosts:" hosts > "/dev/stderr"
-                exit 1
-            }
-        }
-    ' .hosts.yml
+explain_ssh_failure() {
+    (($1 == 255)) || return 0
+    printf '%s\n' "SSH to '$ssh_host' (Deployer host '$host') failed." \
+        "Check the network, the host key and your authentication." >&2
+    explain_ssh_configuration
 }
+
+resolve_upload_directory() (
+    cd -P -- "$project_root/$1" 2>/dev/null \
+        || die "$1 does not exist. Run ddev restart or create the directory."
+    [[ "$PWD/" == "$project_root/"?* ]] \
+        || die "$1 must resolve to a directory inside the project, but resolves to $PWD."
+    printf '%s\n' "$PWD"
+)
 
 # DDEV lists the effective upload_dirs as container paths in DDEV_FILES_DIRS.
 read_upload_directories() {
-    local path
-    local -a paths
+    local path resolved previous
+    local -a paths destinations=()
     [[ -n "${DDEV_FILES_DIRS:-}" ]] || die "DDEV lists no upload directory. Check upload_dirs."
     IFS=, read -r -a paths <<< "$DDEV_FILES_DIRS"
     upload_directories=()
     for path in "${paths[@]}"; do
         path=${path#/var/www/html/}
-        case "$path" in
-            /*|'') die "DDEV upload directory '$path' must be a subdirectory of the project." ;;
-            # openrsync drops the quotes of --rsync-path, so whitespace would
-            # split the remote path, as for deploy_path.
-            *[[:space:]]*) die "DDEV upload directory '$path' must not contain whitespace." ;;
-        esac
+        [[ "$path" != /* ]] || die "Upload directory '$path' must lie inside the project."
+        check_remote_path "$path"
+        resolved=$(resolve_upload_directory "$path") || exit 1
+        for previous in ${destinations[@]+"${destinations[@]}"}; do
+            [[ "$resolved/" != "$previous/"* && "$previous/" != "$resolved/"* ]] \
+                || die "Upload directories overlap: $resolved and $previous."
+        done
         upload_directories+=("$path")
+        destinations+=("$resolved")
     done
-}
-
-enter_upload_directory() {
-    cd -P -- "$project_root/$1" 2>/dev/null \
-        || die "$1 does not exist. Run ddev restart or create the directory."
-    [[ "$PWD/" == "$project_root/"?* ]] \
-        || die "$1 must resolve to a directory inside the project, but resolves to $PWD."
-}
-
-check_upload_directories() {
-    local directory resolved seen=$'\n'
-    for directory in "${upload_directories[@]}"; do
-        resolved=$(enter_upload_directory "$directory" && pwd -P) || exit 1
-        [[ "$seen" != *$'\n'"$resolved"$'\n'* ]] \
-            || die "Several DDEV upload directories resolve to $resolved."
-        seen+="$resolved"$'\n'
-    done
-}
-
-# The remote login shell interprets a command string, not an argv array.
-quote_for_remote_shell() {
-    printf "'%s'" "${1//\'/\'\\\'\'}"
 }
 
 validate_dump() {
@@ -128,14 +138,16 @@ validate_dump() {
 }
 
 mirror_upload_directory() (
-    enter_upload_directory "$2"
-    echo "Mirroring $2 of $host ($1) ..."
-    rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ \
-        -e 'ssh -T -o RemoteCommand=none' \
-        --rsync-path="cd -- $(quote_for_remote_shell "$1/current/$2") && rsync" \
-        -- "$DDEV_PROJECT:./" ./ || {
+    local destination
+    # Assign first: a failed substitution inside cd would leave cd at "".
+    destination=$(resolve_upload_directory "$1") || exit 1
+    cd -P -- "$destination"
+    echo "Mirroring $1 of $host ($deploy_path) ..."
+    rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ -e "ssh ${ssh_options[*]}" \
+        -- "$ssh_host:$deploy_path/current/$1/" ./ || {
         status=$?
-        printf '%s\n' "The mirror of $2 may be incomplete. Any database imported by this pull stays in place." \
+        explain_ssh_failure "$status"
+        printf '%s\n' "The mirror of $1 may be incomplete. Any database imported by this pull stays in place." \
             "After fixing the cause above, repeat the pull with --skip-db." >&2
         exit "$status"
     }
@@ -144,28 +156,27 @@ mirror_upload_directory() (
 case "${1:-}" in
     check)
         check_programs
-        read_deploy_path >/dev/null
+        read_deployment
         check_ssh_configuration
         read_upload_directories
-        check_upload_directories
         ;;
     export-db)
-        deploy_path=$(read_deploy_path)
-        php_command=$(tr -d '\r' < deploy.php | sed -n "s/^set('bin\/php', '\(.*\)');$/\1/p")
-        php_command=${php_command//\{\{deploy_path\}\}/"${deploy_path}"}
-        [[ "$php_command" != *$'\n'* ]] || die "Expected one bin/php assignment in deploy.php."
-        # Deployer treats bin/php as a trusted command, including PHP flags.
+        read_deployment
+        check_ssh_configuration
         echo "Exporting the database of $host ($deploy_path) ..."
         umask 077
         set -o noclobber
-        ssh -T -o RemoteCommand=none -C -- "$DDEV_PROJECT" \
-            "cd -- $(quote_for_remote_shell "$deploy_path/current") && ${php_command:-php} vendor/bin/typo3 --no-interaction database:export -c Default -e 'cache_*' -e '[bf]e_sessions' -e sys_log -e sys_http_report -e sys_file_processedfile" > "$dump" || {
+        trap 'rm -f -- "$dump"' EXIT
+        # Like Deployer, treat bin/php as a trusted command including flags.
+        ssh "${ssh_options[@]}" -C -- "$ssh_host" \
+            "cd -- $deploy_path/current && $php_command vendor/bin/typo3 --no-interaction database:export -c Default -e 'cache_*' -e '[bf]e_sessions' -e sys_log -e sys_http_report -e sys_file_processedfile" > "$dump" || {
             status=$?
-            ((status != 255)) || printf '%s\n' "The SSH session for '$DDEV_PROJECT' failed." \
-                "Check host, user, host key and authentication in ~/.ssh/config. The database has not been imported." >&2
+            explain_ssh_failure "$status"
+            printf '%s\n' "The database export of $host failed. The database has not been imported." >&2
             exit "$status"
         }
         validate_dump
+        trap - EXIT
         ;;
     import-db)
         validate_dump
@@ -175,11 +186,11 @@ case "${1:-}" in
         rm -- "$dump"
         ;;
     mirror-files)
-        deploy_path=$(read_deploy_path)
+        read_deployment
+        check_ssh_configuration
         read_upload_directories
-        check_upload_directories
         for directory in "${upload_directories[@]}"; do
-            mirror_upload_directory "$deploy_path" "$directory"
+            mirror_upload_directory "$directory"
         done
         ;;
     *)
