@@ -59,7 +59,6 @@ hosts:
     hostname: deploy.example.invalid
     remote_user: deploy
     port: 2222
-    bin/php: /usr/bin/php8.4 -d memory_limit=1024M
   production:
     <<: *base
     deploy_path: /srv/example/production
@@ -68,18 +67,36 @@ hosts:
     deploy_path: /srv/example/staging
 ```
 
-It uses these settings of the selected host, with Deployer's defaults:
+It uses these settings of the selected host:
 
 - `deploy_path` (required) and `hostname` (default: the host name, used
   only for SSH configuration hints).
 - `remote_user` and `port` (default: whatever OpenSSH uses for that
   project alias).
-- `bin/php` (default: `php`). `{{deploy_path}}` is resolved, other
-  placeholders are refused. It runs in the remote shell as a trusted command,
-  as in Deployer. The provider does not read `deploy.php`: if you set
-  `bin/php` there with `set()`, move it to `.hosts.yml`, for all hosts at
-  once through a template like `.base` above. Deployer applies host
-  settings the same way.
+- `bin/php` (optional). By default the provider invokes `vendor/bin/typo3`
+  directly, so the Composer binary's shebang selects the interpreter
+  (usually `#!/usr/bin/env php`, using the remote shell's `PATH`). Set
+  `bin/php` only if you need a specific PHP binary or flags, such as a custom
+  `php.ini`. `{{deploy_path}}` is resolved; other placeholders are refused.
+  The override runs in the remote shell as a trusted command, as in Deployer.
+  Deployer itself applies host settings the same way. The provider does not
+  read `deploy.php`.
+
+For a conventional setup, leave `bin/php` out of `.hosts.yml`. Verify the
+CLI in the same non-interactive SSH environment used by the provider:
+
+```bash
+ssh -T -o RemoteCommand=none example-typo3 \
+  'cd /srv/example/production/current && vendor/bin/typo3 --version'
+```
+
+The PHP version and configuration on the remote server must meet the
+requirements of that release. A working interactive login does not guarantee
+that the non-interactive shell has the same `PATH` or PHP configuration.
+If the direct invocation fails, fix the server's CLI environment or set the
+optional override. A project that needs additional PHP flags can, for example,
+use `bin/php: '/usr/bin/php8.5-cli -c {{deploy_path}}/shared/php-cli.ini'`.
+The local DDEV PHP version is independent of the remote CLI.
 
 SSH and rsync connect using the existing alias named after the DDEV project
 (`DDEV_PROJECT`). OpenSSH resolves the hostname, user, port, keys, proxies
@@ -112,9 +129,10 @@ because openrsync drops quotes. They may only contain letters, digits and
 `._/@+=,-`, without empty, `.` or `..` segments. `hostname`, `remote_user`
 and `port` must not contain whitespace.
 
-Each `<deploy_path>/current` must have `vendor/bin/typo3` and the upload
-directories at the same paths relative to the project root as in DDEV.
-The provider mirrors DDEV's effective `upload_dirs`, except directories
+For database pulls, `<deploy_path>/current` must contain the TYPO3 Composer
+CLI at `vendor/bin/typo3` (executable when no `bin/php` override is set).
+For file pulls it must contain the upload directories at the same paths
+relative to the project root as in DDEV. The provider mirrors DDEV's effective `upload_dirs`, except directories
 named `node_modules`. TYPO3 defaults to
 `fileadmin` when no custom list is configured. To also mirror `uploads`,
 configure both directories in `.ddev/config.yaml`:
@@ -127,7 +145,10 @@ upload_dirs:
 
 DDEV resolves these paths relative to the docroot. Each local destination
 must already exist and resolve to a directory inside the project that does
-not overlap with another upload directory.
+not overlap with another upload directory. The project root and project
+metadata directories `.git` and `.ddev` (including symlinks into them) are
+not valid upload destinations. Do not list local source or dependency
+directories as uploads, other than the documented `node_modules` exception.
 
 DDEV also uses `upload_dirs` to exclude directories from Mutagen syncing.
 Entries named `node_modules` (for example `../node_modules` with a `public`
@@ -141,8 +162,10 @@ the files step is a no-op.
 
 - **SSH:** Keep the existing project alias and SSH configuration. The
   provider checks explicitly configured user and port against `.hosts.yml`.
-- **PHP:** 1.0 read `set('bin/php', ...)` from `deploy.php`. Move that value
-  to `bin/php` in `.hosts.yml`.
+- **PHP:** 1.0 read `set('bin/php', ...)` from `deploy.php`. If the remote
+  CLI already uses the correct PHP version and configuration, no PHP setting
+  is needed for the provider. Otherwise move the override to `bin/php` in
+  `.hosts.yml` so that both Deployer and the provider use the same setting.
 
 ## Use
 
@@ -180,8 +203,9 @@ valid upload destinations. If the SSH configuration cannot be read, is
 incomplete, or has a user or port mismatch, the provider shows the `Host`
 block above with a placeholder for the key. Exit status 255 can indicate an
 SSH connection error or a failed remote command (including a PHP fatal error).
-Check the original error output; for a PHP error, verify the remote `bin/php`
-in `.hosts.yml`.
+Check the original error output; for a PHP error, verify the remote CLI
+PHP environment or optional `bin/php` in `.hosts.yml`. The remote CLI must
+provide `database:export` (normally from TYPO3 Console).
 The PHP version in the local DDEV container does not control the remote
 export. SSH disables a forced TTY and remote commands from `~/.ssh/config`.
 The export reads the `Default` connection and streams the dump over
@@ -193,10 +217,18 @@ excluded. Extra dump options belong in TYPO3 Console's configuration for
 The provider requires SSH to succeed and checks the dump's TYPO3 Console
 header and completion footer before import. These checks detect interrupted
 or contaminated streams. Import can still fail on SQL errors or an
-incompatible database. After import, TYPO3 Console updates the schema with
-`*.add,*.change`, flushes caches and the provider deletes the dump. Failed
-runs and `--skip-import` can leave a restricted-permission dump at
-`.ddev/.downloads/db.sql`. Treat it and the imported data as sensitive.
+incompatible database. Before replacing the local database, the provider
+checks that the local TYPO3 CLI can provide `database:updateschema` and
+`cache:flush`. The commands must be available even before importing; a local
+CLI that cannot bootstrap must be repaired first. After import, the provider
+runs `database:updateschema safe` (add/change operations, not rename/drop)
+and the native `cache:flush`. It does not initialize extensions or run upgrade
+wizards. The dump is deleted after all three local steps succeed. Failed
+imports or post-import steps and `--skip-import` can leave a restricted-
+permission dump at `.ddev/.downloads/db.sql`. A failed export removes only the
+dump it created; the helper refuses to overwrite an existing dump. DDEV itself
+manages the downloads directory, so save any dump you need to keep outside it
+before another pull. Treat dumps and imported data as sensitive.
 
 Rsync mirrors content, timestamps and safe symlinks. It deletes local files
 absent upstream. It leaves `_processed_/`, `_temp_/` and `node_modules/` alone and uses local
@@ -204,17 +236,24 @@ ownership and permission defaults. Run one pull at a time
 per project. The provider handles a single database connection and the
 upload directories listed by DDEV.
 
-If rsync fails, the provider shows rsync's error, keeps its exit status and
-warns that the mirror may be incomplete. After resolving the error, use
-`--skip-db` to retry the files alone.
+Before the first rsync, the files step checks that rsync is available remotely
+and all requested remote upload directories exist. This avoids starting a
+partial file mirror when a later source is already missing. Because DDEV's
+preflight has no skip flags and the files step runs after the database import,
+a remote file preflight failure can still leave the new local database in place.
+It does not block database-only pulls. If rsync fails, the provider shows its
+error, keeps its exit status and warns that the mirror may be incomplete.
+After resolving the error, use `--skip-db` to retry the files alone. A running
+pull is not atomic; avoid concurrent pulls and deployments that change the
+`current` symlink while pulling.
 
 ## Platform coverage
 
-Previous direct-connection version tested on Apple Silicon macOS with OrbStack, DDEV 1.25.0 and 1.25.6,
-Homebrew rsync and the macOS openrsync client. The smoke test uses a
-disposable project, a synthetic MySQL database, a local SSH stand-in and
-fixtures for TYPO3 Console. The alias-based revision requires a fresh DDEV
-smoke-test run. Run it with `bash tests/smoke.sh`. Set
+Previous releases were tested on Apple Silicon macOS with OrbStack, DDEV
+1.25.0 and 1.25.6, Homebrew rsync and the macOS openrsync client. The smoke
+test uses a disposable project, a synthetic MySQL database, a local SSH
+stand-in and fixtures for TYPO3 Console. Run a fresh smoke test for changes
+with `bash tests/smoke.sh`. Set
 `TEST_RSYNC=/path/to/rsync` to test another rsync implementation.
 
 Linux and WSL2 are expected to work with the required host tools. Native

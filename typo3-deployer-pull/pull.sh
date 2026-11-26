@@ -27,17 +27,17 @@ check_programs() {
 
 # Deployer runs only in CI. Read the selected host from .hosts.yml with the yq
 # of the DDEV web container, resolving anchors and merge keys as the YAML spec
-# and Deployer do, with Deployer's defaults for hostname and bin/php.
+# and Deployer do. The PHP override is optional; the CLI normally selects PHP.
 read_deployment() {
     local values
     values=$(ddev exec --raw -- env "DEPLOYER_HOST=$host" yq --yaml-fix-merge-anchor-to-spec=true '
         .hosts[strenv(DEPLOYER_HOST)]
-        | [.deploy_path, .hostname // strenv(DEPLOYER_HOST), .remote_user, .port, .["bin/php"] // "php"]
+        | [.["bin/php"], .deploy_path, .remote_user, .port, .hostname // strenv(DEPLOYER_HOST)]
         | map((. // "") | to_string | select(test("^[^\\x00-\\x1f\\x7f]*$")))
         | select(length == 5) | .[]
         ' /var/www/html/.hosts.yml) || die "Could not read .hosts.yml with the yq of the DDEV web container."
-    { IFS= read -r deploy_path && IFS= read -r ssh_hostname && IFS= read -r ssh_user &&
-        IFS= read -r ssh_port && IFS= read -r php_command; } <<< "$values" \
+    { IFS= read -r php_command && IFS= read -r deploy_path && IFS= read -r ssh_user &&
+        IFS= read -r ssh_port && IFS= read -r ssh_hostname; } <<< "$values" \
         || die "The settings of host '$host' in .hosts.yml must be single-line values."
     deploy_path=${deploy_path%/}
     [[ "$deploy_path" == /?* ]] || die "No absolute deploy_path for host '$host' in .hosts.yml."
@@ -109,6 +109,10 @@ resolve_upload_directory() (
         || die "$1 does not exist. Run ddev restart or create the directory."
     [[ "$PWD/" == "$project_root/"?* ]] \
         || die "$1 must resolve to a directory inside the project, but resolves to $PWD."
+    case "$PWD/" in
+        "$project_root/.git/"*|"$project_root/.ddev/"*)
+            die "Upload directory '$1' resolves to protected project metadata: $PWD." ;;
+    esac
     printf '%s\n' "$PWD"
 )
 
@@ -129,6 +133,9 @@ read_upload_directories() {
                 ;;
         esac
         [[ "$path" != /* ]] || die "Upload directory '$path' must lie inside the project."
+        case "$path/" in
+            .git/*|.ddev/*) die "Upload directory '$path' points to protected project metadata." ;;
+        esac
         check_remote_path "$path"
         resolved=$(resolve_upload_directory "$path") || exit 1
         for previous in ${destinations[@]+"${destinations[@]}"}; do
@@ -140,8 +147,40 @@ read_upload_directories() {
     done
 }
 
+# Check every source before the first destructive rsync, not in auth_command:
+# DDEV does not expose skip flags there, and database-only pulls need no files.
+check_remote_upload_directories() {
+    local directory command status
+    [[ -n "${upload_directories[0]:-}" ]] || return 0
+    command="command -v rsync >/dev/null || { echo 'rsync is not available on the deployment server.' >&2; exit 1; };"
+    for directory in "${upload_directories[@]}"; do
+        command+=" test -d $deploy_path/current/$directory || { echo 'Remote upload directory does not exist: $deploy_path/current/$directory' >&2; exit 1; };"
+    done
+    ssh "${ssh_options[@]}" -- "$ssh_host" "$command" || {
+        status=$?
+        explain_status_255 "$status"
+        printf '%s\n' 'Remote file preflight failed. No upload directories have been mirrored in this step.' \
+            'Any database imported by this pull stays in place. After fixing the cause, repeat with --skip-db.' >&2
+        exit "$status"
+    }
+}
+
+check_local_cli() {
+    local command status
+    for command in database:updateschema cache:flush; do
+        ddev typo3 --no-interaction help "$command" >/dev/null || {
+            status=$?
+            printf '%s\n' "The local TYPO3 CLI cannot provide '$command'." \
+                'Check the local PHP version, Composer installation and helhum/typo3-console for database:updateschema.' \
+                'The database has not been imported.' >&2
+            exit "$status"
+        }
+    done
+}
+
 validate_dump() {
-    [[ "$(head -n 2 "$dump")" == $'\n-- Dump of TYPO3 Connection "Default"' ]] \
+    [[ -f "$dump" && ! -L "$dump" ]] \
+        && [[ "$(head -n 2 "$dump")" == $'\n-- Dump of TYPO3 Connection "Default"' ]] \
         && [[ "$(tail -n 1 "$dump")" == '-- Dump completed'* ]] \
         || die "The dump is incomplete or contains unexpected output. The database has not been imported."
 }
@@ -175,30 +214,52 @@ case "${1:-}" in
         echo "Exporting the database of $host ($deploy_path) ..."
         umask 077
         set -o noclobber
+        # Register cleanup only after successfully creating our own dump.
+        [[ ! -e "$dump" && ! -L "$dump" ]] || die "Database dump '$dump' already exists. Move or remove it before retrying."
+        if ! exec 3> "$dump"; then
+            die "Could not create database dump '$dump'. The database has not been imported."
+        fi
         trap 'rm -f -- "$dump"' EXIT
-        # Like Deployer, treat bin/php as a trusted command including flags.
+        # Like Deployer, treat an explicit bin/php as a trusted command including flags.
+        # Otherwise execute the Composer binary directly, using its shebang.
         ssh "${ssh_options[@]}" -C -- "$ssh_host" \
-            "cd -- $deploy_path/current && $php_command vendor/bin/typo3 --no-interaction database:export -c Default -e 'cache_*' -e '[bf]e_sessions' -e sys_log -e sys_http_report -e sys_file_processedfile" > "$dump" || {
+            "cd -- $deploy_path/current && ${php_command:+$php_command }vendor/bin/typo3 --no-interaction database:export -c Default -e 'cache_*' -e '[bf]e_sessions' -e sys_log -e sys_http_report -e sys_file_processedfile" >&3 || {
             status=$?
             explain_status_255 "$status"
             printf '%s\n' "The database export of $host failed. The database has not been imported." \
-                "If PHP failed, check bin/php for host '$host' in .hosts.yml (default: php)." >&2
+                "Check that vendor/bin/typo3 provides database:export on the server (helhum/typo3-console)." \
+                "If PHP failed, check the remote CLI PHP environment or bin/php for host '$host' in .hosts.yml." >&2
             exit "$status"
         }
+        exec 3>&-
         validate_dump
         trap - EXIT
         ;;
     import-db)
         validate_dump
-        ddev import-db --file="$dump"
-        ddev typo3 database:updateschema '*.add,*.change'
-        ddev typo3 cache:flush
+        check_local_cli
+        ddev import-db --file="$dump" || {
+            status=$?
+            printf '%s\n' "Database import failed. The local database may be incomplete. Dump retained: $dump" >&2
+            exit "$status"
+        }
+        ddev typo3 --no-interaction database:updateschema safe || {
+            status=$?
+            printf '%s\n' "Database imported, but schema update failed. Dump retained: $dump" >&2
+            exit "$status"
+        }
+        ddev typo3 --no-interaction cache:flush || {
+            status=$?
+            printf '%s\n' "Database imported and schema updated, but cache flush failed. Dump retained: $dump" >&2
+            exit "$status"
+        }
         rm -- "$dump"
         ;;
     mirror-files)
         read_deployment
         check_ssh_configuration
         read_upload_directories
+        check_remote_upload_directories
         for directory in ${upload_directories[@]+"${upload_directories[@]}"}; do
             mirror_upload_directory "$directory"
         done

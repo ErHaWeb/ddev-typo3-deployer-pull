@@ -116,12 +116,21 @@ expect_failure 'Missing on this machine: rsync' env PATH="$work/no-rsync" \
     /bin/bash .ddev/typo3-deployer-pull/pull.sh check
 
 # Run real rsync through a fixture-local SSH transport. Run real database imports
-# while recording the two TYPO3 CLI calls, so no TYPO3 installation is required.
+# while recording TYPO3 CLI calls, so no TYPO3 installation is required.
 cat >"$work/bin/ddev" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == typo3 ]]; then
     printf '%s\n' "$*" >>"$TEST_WORK/typo3.log"
+    if [[ "${2:-}" == --no-interaction && "${3:-}" == help && "${4:-}" == "${TEST_LOCAL_CLI_MISSING:-}" ]]; then
+        printf 'Command "%s" is not defined.\n' "$4" >&2
+        exit 1
+    fi
+    if [[ "${2:-}" == --no-interaction && "${3:-}" == "${TEST_LOCAL_CLI_FAILURE:-}" ]]; then
+        exit 42
+    fi
+elif [[ "${1:-}" == import-db && -n "${TEST_IMPORT_FAILURE:-}" ]]; then
+    exit 43
 else
     exec "$TEST_DDEV" "$@"
 fi
@@ -146,6 +155,10 @@ shift
 if [[ -n "${TEST_SSH_FAILURE:-}" ]]; then
     printf '%s\n' 'Permission denied (publickey).' >&2
     exit 255
+fi
+if [[ "$*" == 'command -v rsync '* && -n "${TEST_REMOTE_RSYNC_MISSING:-}" ]]; then
+    echo 'rsync is not available on the deployment server.' >&2
+    exit 1
 fi
 exec /bin/sh -c "$*"
 BASH
@@ -185,6 +198,13 @@ exec /bin/bash "$@"
 BASH
     chmod +x "$work/$environment/bin/php"
     cat >"$release/vendor/bin/typo3" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "--no-interaction database:export -c Default -e cache_* -e [bf]e_sessions -e sys_log -e sys_http_report -e sys_file_processedfile" ]]
+if [[ -n "${TEST_REMOTE_CLI_MISSING:-}" ]]; then
+    echo 'Command "database:export" is not defined.' >&2
+    exit 1
+fi
 case "${TEST_DUMP:-complete}" in
     noisy) echo 'Unexpected shell output' ;;
 esac
@@ -196,6 +216,7 @@ if [[ "${TEST_DUMP:-complete}" != truncated ]]; then
     printf '%s\n' '-- Dump completed on 2026-01-01'
 fi
 BASH
+    chmod +x "$release/vendor/bin/typo3"
 done
 
 sed 's/$/\r/' >.hosts.yml <<YAML
@@ -255,7 +276,7 @@ test -f "$fileadmin/_processed_/keep"
 test -f "$fileadmin/_temp_/keep"
 test ! -e "$fileadmin/_temp_/from-server"
 test ! -e "$dump"
-printf '%s\n' 'typo3 database:updateschema *.add,*.change' 'typo3 cache:flush' >"$work/expected-cli.log"
+printf '%s\n' 'typo3 --no-interaction help database:updateschema' 'typo3 --no-interaction help cache:flush' 'typo3 --no-interaction database:updateschema safe' 'typo3 --no-interaction cache:flush' >"$work/expected-cli.log"
 cmp "$work/expected-cli.log" "$work/typo3.log"
 # The explicit remote_user wins over the merge key, as in the YAML spec.
 grep -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/production/current && $work/production/bin/php -d memory_limit=128M vendor/bin/typo3" "$work/ssh.log"
@@ -293,7 +314,7 @@ test ! -e "$dump"
 check_db staging
 for php_status in 255 1; do
     TEST_PHP_FAILURE=$php_status expect_failure 'Composer detected issues in your platform:' pull -y
-    grep -F "If PHP failed, check bin/php for host 'production' in .hosts.yml" "$work/failure.log"
+    grep -F "If PHP failed, check the remote CLI PHP environment or bin/php for host 'production' in .hosts.yml" "$work/failure.log"
     grep -E "exit status $php_status$" "$work/failure.log"
     if grep -F "SSH to '$project'" "$work/failure.log" || grep -F "Host $project" "$work/failure.log"; then
         fail 'remote PHP error must not be diagnosed as an SSH configuration failure'
@@ -302,6 +323,64 @@ for php_status in 255 1; do
     check_db staging
     [[ "$(cat "$fileadmin/from-server")" == staging ]]
 done
+# Required CLI commands are checked only for a database import; no package-name
+# or version heuristic is needed. Failure must not replace the local database.
+for command in database:updateschema cache:flush; do
+    TEST_LOCAL_CLI_MISSING=$command expect_failure "The local TYPO3 CLI cannot provide '$command'" pull -y
+    test -s "$dump"
+    check_db staging
+    [[ "$(cat "$fileadmin/from-server")" == staging ]]
+done
+TEST_REMOTE_CLI_MISSING=1 expect_failure 'Check that vendor/bin/typo3 provides database:export' pull -y
+test ! -e "$dump"
+check_db staging
+TEST_LOCAL_CLI_MISSING=database:updateschema pull --skip-db --environment=host=staging -y
+TEST_LOCAL_CLI_MISSING=database:updateschema pull --skip-files --skip-import -y
+check_db staging
+
+# DDEV normally manages its downloads directory. Test the helper directly to
+# ensure it never truncates or deletes a pre-existing dump on export failure.
+helper() {
+    env DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" host=production \
+        DDEV_FILES_DIRS=/var/www/html/public/fileadmin \
+        bash .ddev/typo3-deployer-pull/pull.sh "$@"
+}
+cp "$dump" "$work/saved-dump"
+expect_failure 'already exists' helper export-db
+cmp "$dump" "$work/saved-dump"
+rm "$dump"
+ln -s "$work/saved-dump" "$dump"
+expect_failure 'already exists' helper export-db
+test -L "$dump"
+test -s "$work/saved-dump"
+rm "$dump"
+
+# Phase-specific diagnostics and recovery: keep the valid dump on local failure.
+cp "$work/saved-dump" "$dump"
+TEST_IMPORT_FAILURE=1 expect_failure 'Database import failed. The local database may be incomplete.' helper import-db
+test -s "$dump"
+check_db staging
+TEST_LOCAL_CLI_FAILURE=database:updateschema expect_failure 'Database imported, but schema update failed.' helper import-db
+test -s "$dump"
+check_db production
+TEST_LOCAL_CLI_FAILURE=cache:flush expect_failure 'Database imported and schema updated, but cache flush failed.' helper import-db
+test -s "$dump"
+helper import-db
+test ! -e "$dump"
+check_db production
+pull --skip-files --environment=host=staging -y
+check_db staging
+
+# Protect project metadata even when an upload path is a symlink.
+mkdir -p .git
+expect_failure 'protected project metadata' env DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" host=production \
+    DDEV_FILES_DIRS=/var/www/html/.git bash .ddev/typo3-deployer-pull/pull.sh check
+ln -s ../.ddev public/metadata-link
+expect_failure 'protected project metadata' env DDEV_APPROOT="$PWD" DDEV_PROJECT="$project" host=production \
+    DDEV_FILES_DIRS=/var/www/html/public/metadata-link bash .ddev/typo3-deployer-pull/pull.sh check
+rm public/metadata-link
+rmdir .git
+
 # Explicit user or port mismatches must stop before any remote transfer or local import.
 remote_calls_before=$(grep -c '^-T ' "$work/ssh.log")
 for mismatch in TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
@@ -357,6 +436,23 @@ check_db production
 [[ "$(cat shared-uploads/from-server)" == staging ]]
 test ! -e public/uploads/local-only
 test ! -e shared-uploads/local-only
+
+echo 'Testing all remote file sources before mirroring any local destination'
+touch "$fileadmin/preflight-keep"
+mv "$work/staging/current/shared-uploads" "$work/staging/missing-uploads"
+expect_failure 'Remote upload directory does not exist:' pull --skip-db --environment=host=staging -y
+grep -F 'No upload directories have been mirrored in this step.' "$work/failure.log"
+test -f "$fileadmin/preflight-keep"
+# A missing remote upload directory must not block a database-only pull.
+pull --skip-files --environment=host=staging -y
+check_db staging
+mv "$work/staging/missing-uploads" "$work/staging/current/shared-uploads"
+pull --skip-files --environment=host=production -y
+check_db production
+TEST_REMOTE_RSYNC_MISSING=1 expect_failure 'rsync is not available on the deployment server.' pull --skip-db --environment=host=staging -y
+test -f "$fileadmin/preflight-keep"
+pull --skip-db --environment=host=staging -y
+test ! -e "$fileadmin/preflight-keep"
 
 echo 'Testing node_modules exclusions, including nested directories and dependency-only lists'
 cat >.ddev/config.uploads.yaml <<'YAML'
@@ -422,15 +518,22 @@ rm public/uploads
 mv "$work/outside-uploads" public/uploads
 rm .ddev/config.uploads.yaml
 
-echo 'Testing an empty docroot and the php default without bin/php'
+echo 'Testing an empty docroot and direct CLI execution without bin/php'
 mkdir -p "$work/production/current/fileadmin" fileadmin
 touch "$work/production/current/fileadmin/root-docroot"
 printf 'hosts:\n  production:\n    hostname: deployment.example.invalid\n    deploy_path: %s/production\n' "$work" >.hosts.yml
-ln -s "$work/production/bin/php" "$work/bin/php"
+# The default must invoke the executable directly, not prefix it with php.
+cat >"$work/bin/php" <<'BASH'
+#!/usr/bin/env bash
+echo 'Unexpected explicit php invocation' >&2
+exit 99
+BASH
+chmod +x "$work/bin/php"
 "$TEST_DDEV" config --docroot=''
 printf '<?php echo "fixture";\n' >index.php
-TEST_PHP_FLAGS=none pull --skip-files -y
+pull --skip-files -y
 check_db production
+grep -F -- "cd -- $work/production/current && vendor/bin/typo3 --no-interaction database:export" "$work/ssh.log"
 pull --skip-db -y
 test -f fileadmin/root-docroot
 
