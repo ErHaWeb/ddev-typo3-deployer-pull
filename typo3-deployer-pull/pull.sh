@@ -203,7 +203,8 @@ mirror_upload_directory() (
         status=$?
         explain_status_255 "$status"
         printf '%s\n' "The mirror of $1 may be incomplete. Any database imported by this pull stays in place." \
-            "After fixing the cause above, repeat the same pull with --skip-db (keep the selected host)." >&2
+            "See rsync troubleshooting (including filename encoding errors): https://github.com/ErHaWeb/ddev-typo3-deployer-pull#troubleshooting" \
+            "After fixing the cause above, repeat the same pull with --skip-db if the database is still current (keep the selected host)." >&2
         exit "$status"
     }
 )

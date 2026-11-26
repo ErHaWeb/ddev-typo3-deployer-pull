@@ -552,6 +552,7 @@ mv "$work/outside" "$fileadmin"
 begin_case 'Preserve rsync exit statuses and report partial updates after database import'
 TEST_RSYNC_FAILURE=1 expect_failure 'The mirror of public/fileadmin may be incomplete' pull --skip-db -y
 assert_log_contains "$work/failure.log" -F 'Illegal byte sequence (92)'
+assert_log_contains "$work/failure.log" -F 'https://github.com/ErHaWeb/ddev-typo3-deployer-pull#troubleshooting'
 assert_log_contains "$work/failure.log" -E 'exit status 23$'
 check_db staging
 TEST_RSYNC_FAILURE=1 TEST_RSYNC_STATUS=255 expect_failure 'can indicate an SSH connection error or a failed remote command' pull --skip-db -y

@@ -231,11 +231,53 @@ is usually just a summary.
 | `rsync` is missing | Install it on the local computer or deployment server, as indicated by the error. |
 | A dump already exists | Save or remove it securely before retrying. |
 | Database dump is incomplete | Check remote CLI output and the connection. The provider rejects incomplete dumps before import. |
-| File synchronization fails | The database may already have been replaced. Fix the cause and retry the same host with `--skip-db`; restore from backup if needed. |
+| `rsync: mkstemp ... Illegal byte sequence (92)` | The local filesystem may reject non-UTF-8 filenames from the server. See [filename encoding errors](#filename-encoding-errors-on-macos). |
+| File synchronization fails | The database may already have been replaced. Fix the cause and retry the same host with `--skip-db` if the database is still current; restore from backup if needed. |
 | Import or schema/cache update fails | Check the reported phase. The local database may be incomplete or not fully prepared. Save any needed dump before retrying and restore from backup if necessary. |
 
 Keep any needed SQL dump (`.ddev/.downloads/db.sql`) securely outside DDEV's
 downloads directory before retrying. Do not commit dumps or uploads to Git.
+
+### Filename encoding errors on macOS
+
+If a file pull reports errors like these, read the first rsync error rather
+than only the final exit status:
+
+```text
+rsync: [receiver] mkstemp ".../.Pi\#351ces.pdf.ABC123" failed: Illegal byte sequence (92)
+rsync error: some files/attrs were not transferred (code 23)
+```
+
+This typically means the local filesystem cannot create a filename received
+from the server, not that the add-on is broken. Linux filesystems can store
+names containing legacy-encoded bytes that macOS APFS rejects because they
+are not valid UTF-8. Accented characters themselves are not a problem when
+properly encoded. Rsync displays some bytes using octal escapes such as
+`\#351`; the escape is not necessarily part of the actual filename.
+
+1. Identify the affected files and check their filename encoding on the
+   server. Ask your hosting provider or developer for help if necessary.
+   See the [read-only diagnostic example](docs/technical-reference.md#diagnosing-filename-encoding-errors).
+2. Correct the filenames at their source using valid UTF-8. Back up the
+   remote files and database first. For TYPO3-managed files, coordinate the
+   change through the File Abstraction Layer (FAL) where possible, and verify
+   file references, direct URLs and any external import process. Do not
+   blindly rename files or convert the entire upload directory.
+3. Once the remote files and their references are consistent, retry the pull.
+   If only the file transfer failed and the imported database still matches
+   the remote data, you can retry only the files:
+
+   ```bash
+   ddev pull typo3-deployer --skip-db
+   ```
+
+   If fixing the filenames changed remote database records or references,
+   run a full pull instead. Keep the same selected deployment host.
+
+Exit code 23 is a general partial-transfer error, not proof of an encoding
+problem. A failed transfer can leave the local files partly synchronized.
+The add-on deliberately does not guess the encoding, rename files, silently
+skip rejected files or report an incomplete transfer as successful.
 
 ## Why TYPO3 Console?
 

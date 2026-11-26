@@ -114,6 +114,53 @@ timestamps and safe symlinks, using local ownership and permission defaults.
 Files absent upstream are deleted. `_processed_/`, `_temp_/` and
 `node_modules/` are excluded from transfers and deletions.
 
+### Diagnosing filename encoding errors
+
+In an rsync diagnostic, `\#351` is the octal escape for byte `0xE9` (decimal
+233), which may represent `é` in ISO-8859-1 or Windows-1252 but is not a valid
+standalone UTF-8 byte. The displayed escape alone does not establish the
+source encoding; the receiver's `Illegal byte sequence (92)` is the relevant
+filesystem error. See the [rsync manual](https://download.samba.org/pub/rsync/rsync.1.html)
+and [Apple's APFS filename documentation](https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/APFS_Guide/FAQ/FAQ.html).
+
+If Python 3 is available on the remote server, the following optional
+read-only diagnostic lists names that cannot be decoded as UTF-8. Connect
+using the existing SSH alias, change into the selected release and adapt
+`public/fileadmin` to the affected upload directory before running it:
+
+```bash
+python3 - <<'PYTHON'
+import os
+
+
+def fail(error):
+    raise error
+
+
+for root, directories, files in os.walk(b'public/fileadmin', onerror=fail):
+    for name in directories + files:
+        try:
+            name.decode('utf-8')
+        except UnicodeDecodeError:
+            print(repr(os.path.join(root, name)))
+PYTHON
+```
+
+The scan reads names as bytes, not file contents, and makes no changes. It
+reports invalid UTF-8, not the original character encoding. An empty result
+only means no invalid UTF-8 names were found in the scanned tree. Python is
+not an add-on dependency.
+
+A permanent fix should preserve the consistency of the remote files and
+TYPO3's [FAL records and references](https://docs.typo3.org/m/typo3/reference-coreapi/main/en-us/ApiOverview/Fal/UsingFal/ExamplesFileFolder.html).
+Check the import source as well, so legacy names do not reappear.
+GNU rsync supports `--iconv=LOCAL,REMOTE`, but a single charset conversion
+is not reliable for mixed encodings and may produce local paths that differ
+from TYPO3's imported file identifiers. The provider does not enable it
+implicitly. Changing the locale or switching rsync implementations does not
+make invalid UTF-8 filenames valid on APFS. See the
+[recovery instructions](../README.md#filename-encoding-errors-on-macos).
+
 ## Failure boundaries
 
 DDEV's `auth_command` runs before other steps without access to skip flags.
