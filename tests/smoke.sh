@@ -382,15 +382,23 @@ test -f "$fileadmin/local-only"
 # an IP address. Both database and file pulls must use the existing alias.
 begin_case 'Pull production database and files through the SSH alias; verify YAML merges, PHP flags and exclusions'
 printf 'y\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull typo3-deployer >"$work/first-pull.log" 2>&1 || { cat "$work/first-pull.log" >&2; fail 'combined pull failed'; }
-for message in "Local DDEV project: $project" 'Selected Deployer host: production' \
-    "SSH target via $project: release@deployment.example.invalid (port 2222)" \
-    "Remote release: $work/production/current" 'Database export validated.' \
-    'Checking local TYPO3 CLI for schema updates' 'Replacing the local database' \
-    'Updating the local database schema' 'Flushing local TYPO3 caches' \
-    'Database import and TYPO3 preparation complete.' \
-    'Checking remote upload directories' 'Upload directory synchronization complete.'; do
+# Verify the human-facing phase markers as well as the actual pull results.
+for message in 'TYPO3 Deployer Pull' "Project / SSH alias: $project" \
+    'Database export' 'Database import' 'File synchronization' \
+    '[OK] Local preflight checks passed' 'Exporting remote database (production)' \
+    '[OK] Remote database exported and SQL dump validated' 'SQL dump size:' \
+    'Checking local TYPO3 CLI for schema updates' '[OK] Required local TYPO3 CLI command available' \
+    'Replacing the local database' '[OK] Local database imported' \
+    'Updating the local database schema' '[OK] Database schema updated' \
+    'Flushing local TYPO3 caches' '[OK] TYPO3 caches flushed' \
+    'Checking remote upload directories' '[OK] Remote upload directories verified' \
+    'Synchronizing public/fileadmin' '[OK] Synchronized public/fileadmin'; do
     assert_log_contains "$work/first-pull.log" -F "$message"
 done
+assert_log_contains "$work/first-pull.log" -E 'Environment:[[:space:]]+production'
+assert_log_contains "$work/first-pull.log" -E 'SSH target:[[:space:]]+release@deployment\.example\.invalid \(port 2222\)'
+assert_log_contains "$work/first-pull.log" -F "$work/production/current"
+assert_log_contains "$work/first-pull.log" -E '\[OK\] Local database imported \([0-9]+ s\)'
 check_db production
 [[ "$(cat "$fileadmin/from-server")" == production ]]
 test ! -e "$fileadmin/local-only"
@@ -491,12 +499,21 @@ begin_case 'Report import, schema and cache failures; retain the dump until succ
 # Phase-specific diagnostics and recovery: keep the valid dump on local failure.
 cp "$work/saved-dump" "$dump"
 TEST_IMPORT_FAILURE=1 expect_failure 'Database import failed. The local database may be incomplete.' helper import-db
+if grep -Fq '[OK] Local database imported' "$work/failure.log"; then
+    fail 'failed import must not report success'
+fi
 test -s "$dump"
 check_db staging
 TEST_LOCAL_CLI_FAILURE=database:updateschema expect_failure 'Database imported, but schema update failed.' helper import-db
+if grep -Fq '[OK] Database schema updated' "$work/failure.log"; then
+    fail 'failed schema update must not report success'
+fi
 test -s "$dump"
 check_db production
 TEST_LOCAL_CLI_FAILURE=cache:flush expect_failure 'Database imported and schema updated, but cache flush failed.' helper import-db
+if grep -Fq '[OK] TYPO3 caches flushed' "$work/failure.log"; then
+    fail 'failed cache flush must not report success'
+fi
 test -s "$dump"
 helper import-db
 test ! -e "$dump"
@@ -554,6 +571,9 @@ mv "$work/outside" "$fileadmin"
 
 begin_case 'Preserve rsync exit statuses and report partial updates after database import'
 TEST_RSYNC_FAILURE=1 expect_failure 'The mirror of public/fileadmin may be incomplete' pull --skip-db -y
+if grep -Fq '[OK] Synchronized public/fileadmin' "$work/failure.log"; then
+    fail 'failed rsync must not report success'
+fi
 assert_log_contains "$work/failure.log" -F 'Illegal byte sequence (92)'
 assert_log_contains "$work/failure.log" -F 'https://github.com/ErHaWeb/ddev-typo3-deployer-pull#troubleshooting'
 assert_log_contains "$work/failure.log" -E 'exit status 23$'
@@ -641,7 +661,7 @@ printf '%s\n' local >public/fileadmin/node_modules/keep
 # also survive the parent fileadmin mirror with --delete.
 : >"$work/ssh.log"
 pull --skip-db --environment=host=staging -y >"$work/node-modules.log" 2>&1
-assert_log_contains "$work/node-modules.log" -F 'Skipping dependency directory: node_modules'
+assert_log_contains "$work/node-modules.log" -F '[SKIP] Skipping dependency directory: node_modules'
 assert_log_contains "$work/node-modules.log" -F 'Skipping dependency directory: public/assets/node_modules'
 [[ "$(cat node_modules/keep)" == local ]]
 [[ "$(cat public/assets/node_modules/keep)" == local ]]

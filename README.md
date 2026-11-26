@@ -213,6 +213,17 @@ Use a binary and flags that actually exist on your server. Leave this
 setting out when the direct CLI invocation works. The provider does not
 execute or parse `deploy.php`.
 
+## Reading the pull output
+
+The provider displays the selected environment, effective SSH target and remote
+release path, followed by separate database export, database import and file
+synchronization sections. `[..]` means
+an operation has started, `[OK]` means it completed successfully and `[SKIP]`
+means it was intentionally omitted. Completed transfers and database operations
+show elapsed time in whole seconds; the export also shows the SQL dump size.
+DDEV's own messages and the original errors remain visible. Colors are optional
+and used only when the provider has a suitable terminal; `NO_COLOR` disables them.
+
 ## Troubleshooting
 
 Read the first underlying error in the output; the final `Pull failed` line

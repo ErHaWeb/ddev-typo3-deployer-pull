@@ -204,6 +204,17 @@ To test the development branch, use `ddev add-on get
 ErHaWeb/ddev-typo3-deployer-pull --version main` (on one line). A fixed release
 tag is preferable for a reproducible installation.
 
+## Progress reporting
+
+The provider uses line-oriented Bash logging with ASCII status markers. ANSI
+colors are enabled only when stdout is a terminal, `TERM` is set and is not
+`dumb`, and `NO_COLOR` is unset or empty. DDEV may capture stdout, in which case
+the provider intentionally emits plain text. Timings use Bash `SECONDS` within
+each provider step; the SQL dump size uses the standard `wc -c` utility and is
+informational (rounded down to whole KiB or MiB when appropriate). There is no
+cross-step timer, animated progress indicator or additional rsync option, so
+GNU rsync and openrsync retain the same invocation and exit-status semantics.
+
 ## Smoke tests
 
 Run `bash tests/smoke.sh` from the repository. It creates a disposable DDEV

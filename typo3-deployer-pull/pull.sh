@@ -12,6 +12,56 @@ ssh_host=${DDEV_PROJECT:?No DDEV project selected}
 ssh_options=(-T -o RemoteCommand=none)
 dump=.ddev/.downloads/db.sql
 
+# DDEV may capture provider output even in an interactive terminal. Keep the
+# same readable ASCII labels in that case, and never require ANSI colors.
+color_section='' color_success='' color_muted='' color_reset=''
+if [[ -t 1 && -z "${NO_COLOR:-}" && -n "${TERM:-}" && "$TERM" != dumb ]]; then
+    color_section=$'\033[1;36m'
+    color_success=$'\033[32m'
+    color_muted=$'\033[2m'
+    color_reset=$'\033[0m'
+fi
+
+log_section() {
+    printf '\n%s%s%s\n' "$color_section" "$1" "$color_reset"
+}
+
+log_step() {
+    printf '  [..] %s\n' "$1"
+}
+
+log_success() {
+    local message=$1
+    if [[ $# -gt 1 ]]; then
+        message+=" ($((SECONDS - $2)) s)"
+    fi
+    printf '  %s[OK]%s %s\n' "$color_success" "$color_reset" "$message"
+}
+
+log_info() {
+    printf '       %s\n' "$1"
+}
+
+log_skip() {
+    printf '  %s[SKIP]%s %s\n' "$color_muted" "$color_reset" "$1"
+}
+
+# Report the actual SQL file size, not the database server's allocated size.
+# This is informational only: inability to measure it must not fail the pull.
+log_dump_size() {
+    local bytes
+    if bytes=$(wc -c < "$dump" 2>/dev/null); then
+        bytes=$((bytes)) # BSD wc pads its output with spaces.
+        if ((bytes >= 1048576)); then
+            log_info "SQL dump size: $((bytes / 1048576)) MiB (rounded down)"
+        elif ((bytes >= 1024)); then
+            log_info "SQL dump size: $((bytes / 1024)) KiB (rounded down)"
+        else
+            log_info "SQL dump size: $bytes B"
+        fi
+    fi
+}
+
 die() {
     printf '%s\n' "$*" >&2
     exit 1
@@ -135,7 +185,7 @@ read_upload_directories() {
         # DDEV also uses upload_dirs for Mutagen exclusions such as node_modules.
         case "$path" in
             node_modules|*/node_modules)
-                printf 'Skipping dependency directory: %s\n' "$path"
+                log_skip "Skipping dependency directory: $path"
                 continue
                 ;;
         esac
@@ -157,8 +207,8 @@ read_upload_directories() {
 # Check every source before the first destructive rsync, not in auth_command:
 # DDEV does not expose skip flags there, and database-only pulls need no files.
 check_remote_upload_directories() {
-    local directory command status
-    echo "Checking remote upload directories before synchronizing files ..."
+    local directory command status started=$SECONDS
+    log_step "Checking remote upload directories ..."
     command="command -v rsync >/dev/null || { echo 'rsync is not available on the deployment server.' >&2; exit 1; };"
     for directory in "${upload_directories[@]}"; do
         command+=" test -d $deploy_path/current/$directory || { echo 'Remote upload directory does not exist: $deploy_path/current/$directory' >&2; exit 1; };"
@@ -171,6 +221,7 @@ check_remote_upload_directories() {
             'Any database imported by this pull stays in place. After fixing the cause, repeat the same pull with --skip-db (keep the selected host).' >&2
         exit "$status"
     }
+    log_success "Remote upload directories verified" "$started"
 }
 
 check_local_cli() {
@@ -215,7 +266,7 @@ report_rsync_errors() {
 }
 
 mirror_upload_directory() (
-    local destination error_log status keep_error_log=0
+    local destination error_log status keep_error_log=0 started=$SECONDS
     # Assign first: a failed substitution inside cd would leave cd at "".
     destination=$(resolve_upload_directory "$1") || exit 1
     cd -P -- "$destination"
@@ -223,7 +274,7 @@ mirror_upload_directory() (
     error_log=$(mktemp "${TMPDIR:-/tmp}/typo3-deployer-rsync.XXXXXXXX") \
         || die "Could not create a temporary rsync error log. No files have been mirrored in this directory."
     trap 'if ((keep_error_log == 0)); then rm -f -- "$error_log"; fi' EXIT
-    echo "Mirroring $1 of $host ($deploy_path) ..."
+    log_step "Synchronizing $1 ..."
     rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ --exclude=node_modules/ -e "ssh ${ssh_options[*]}" \
         -- "$ssh_host:$deploy_path/current/$1/" ./ 2>"$error_log" || {
         status=$?
@@ -235,6 +286,7 @@ mirror_upload_directory() (
         exit "$status"
     }
     cat "$error_log" >&2
+    log_success "Synchronized $1" "$started"
 )
 
 case "${1:-}" in
@@ -243,13 +295,20 @@ case "${1:-}" in
         read_deployment
         check_ssh_configuration
         read_upload_directories >/dev/null
-        printf 'Local DDEV project: %s\nSelected Deployer host: %s\nSSH target via %s: %s\nRemote release: %s/current\n' \
-            "$DDEV_PROJECT" "$host" "$ssh_host" "$effective_ssh_target" "$deploy_path"
+        log_section "TYPO3 Deployer Pull"
+        printf '  %-20s %s\n' \
+            'Project / SSH alias:' "$DDEV_PROJECT" \
+            'Environment:' "$host" \
+            'SSH target:' "$effective_ssh_target" \
+            'Remote release:' "$deploy_path/current"
+        log_success "Local preflight checks passed"
         ;;
     export-db)
         read_deployment
         check_ssh_configuration
-        echo "Exporting the database of $host ($deploy_path) ..."
+        log_section "Database export"
+        log_step "Exporting remote database ($host) ..."
+        started=$SECONDS
         umask 077
         set -o noclobber
         # Register cleanup only after successfully creating our own dump.
@@ -272,46 +331,54 @@ case "${1:-}" in
         exec 3>&-
         validate_dump
         trap - EXIT
-        echo "Database export validated."
+        log_success "Remote database exported and SQL dump validated" "$started"
+        log_dump_size
         ;;
     import-db)
         validate_dump
-        echo "Checking local TYPO3 CLI for schema updates ..."
+        log_section "Database import"
+        log_step "Checking local TYPO3 CLI for schema updates ..."
         check_local_cli
-        echo "Replacing the local database ..."
+        log_success "Required local TYPO3 CLI command available"
+        log_step "Replacing the local database ..."
+        started=$SECONDS
         ddev import-db --file="$dump" || {
             status=$?
             printf '%s\n' "Database import failed. The local database may be incomplete. Dump retained: $dump" >&2
             exit "$status"
         }
-        echo "Updating the local database schema (add/change operations) ..."
+        log_success "Local database imported" "$started"
+        log_step "Updating the local database schema (add/change operations) ..."
+        started=$SECONDS
         ddev typo3 --no-interaction database:updateschema safe || {
             status=$?
             printf '%s\n' "Database imported, but schema update failed. Dump retained: $dump" >&2
             exit "$status"
         }
-        echo "Flushing local TYPO3 caches ..."
+        log_success "Database schema updated" "$started"
+        log_step "Flushing local TYPO3 caches ..."
+        started=$SECONDS
         ddev typo3 --no-interaction cache:flush || {
             status=$?
             printf '%s\n' "Database imported and schema updated, but cache flush failed. Dump retained: $dump" >&2
             exit "$status"
         }
+        log_success "TYPO3 caches flushed" "$started"
         rm -- "$dump"
-        echo "Database import and TYPO3 preparation complete."
         ;;
     mirror-files)
         read_deployment
         check_ssh_configuration
+        log_section "File synchronization"
         read_upload_directories
         if [[ -z "${upload_directories[0]:-}" ]]; then
-            echo "No upload directories to synchronize after excluding node_modules."
+            log_skip "No upload directories to synchronize after excluding node_modules."
             exit 0
         fi
         check_remote_upload_directories
         for directory in ${upload_directories[@]+"${upload_directories[@]}"}; do
             mirror_upload_directory "$directory"
         done
-        echo "Upload directory synchronization complete."
         ;;
     *)
         die "Unknown pull step: ${1:-}"
