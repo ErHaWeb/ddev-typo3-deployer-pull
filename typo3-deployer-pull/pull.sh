@@ -95,11 +95,12 @@ check_ssh_configuration() {
     fi
 }
 
-explain_ssh_failure() {
+# SSH uses 255 for transport errors but also forwards remote exit statuses.
+# Neither an SSH command nor rsync returning 255 proves a connection failure.
+explain_status_255() {
     (($1 == 255)) || return 0
-    printf '%s\n' "SSH to '$ssh_host' (Deployer host '$host') failed." \
-        "Check the network, the host key and your authentication." >&2
-    explain_ssh_configuration
+    printf '%s\n' "Exit status 255 for '$ssh_host' (Deployer host '$host') can indicate an SSH connection error or a failed remote command." \
+        "See the error output above. If SSH failed, check the network, host key and authentication." >&2
 }
 
 resolve_upload_directory() (
@@ -146,7 +147,7 @@ mirror_upload_directory() (
     rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ -e "ssh ${ssh_options[*]}" \
         -- "$ssh_host:$deploy_path/current/$1/" ./ || {
         status=$?
-        explain_ssh_failure "$status"
+        explain_status_255 "$status"
         printf '%s\n' "The mirror of $1 may be incomplete. Any database imported by this pull stays in place." \
             "After fixing the cause above, repeat the pull with --skip-db." >&2
         exit "$status"
@@ -171,8 +172,9 @@ case "${1:-}" in
         ssh "${ssh_options[@]}" -C -- "$ssh_host" \
             "cd -- $deploy_path/current && $php_command vendor/bin/typo3 --no-interaction database:export -c Default -e 'cache_*' -e '[bf]e_sessions' -e sys_log -e sys_http_report -e sys_file_processedfile" > "$dump" || {
             status=$?
-            explain_ssh_failure "$status"
-            printf '%s\n' "The database export of $host failed. The database has not been imported." >&2
+            explain_status_255 "$status"
+            printf '%s\n' "The database export of $host failed. The database has not been imported." \
+                "If PHP failed, check bin/php for host '$host' in .hosts.yml (default: php)." >&2
             exit "$status"
         }
         validate_dump

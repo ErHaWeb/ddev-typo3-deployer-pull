@@ -143,6 +143,10 @@ shift 3
 [[ "$1" != -- ]] || shift
 [[ "$1" == "$TEST_PROJECT" && "$#" -ge 2 ]]
 shift
+if [[ -n "${TEST_SSH_FAILURE:-}" ]]; then
+    printf '%s\n' 'Permission denied (publickey).' >&2
+    exit 255
+fi
 exec /bin/sh -c "$*"
 BASH
 cat >"$work/bin/rsync" <<'BASH'
@@ -150,7 +154,7 @@ cat >"$work/bin/rsync" <<'BASH'
 set -euo pipefail
 if [[ -n "${TEST_RSYNC_FAILURE:-}" ]]; then
     printf '%s\n' "rsync: [receiver] mkstemp failed: Illegal byte sequence (92)" >&2
-    exit 23
+    exit "${TEST_RSYNC_STATUS:-23}"
 fi
 exec "$TEST_RSYNC" "$@"
 BASH
@@ -172,13 +176,17 @@ if [[ "${TEST_PHP_FLAGS:-required}" == required ]]; then
     shift 2
 fi
 [[ "$*" == "vendor/bin/typo3 --no-interaction database:export -c Default -e cache_* -e [bf]e_sessions -e sys_log -e sys_http_report -e sys_file_processedfile" ]]
+if [[ -n "${TEST_PHP_FAILURE:-}" ]]; then
+    printf '%s\n' 'Composer detected issues in your platform:' \
+        'Your Composer dependencies require a PHP version ">= 8.5.0". You are running 8.4.28.' >&2
+    exit "$TEST_PHP_FAILURE"
+fi
 exec /bin/bash "$@"
 BASH
     chmod +x "$work/$environment/bin/php"
     cat >"$release/vendor/bin/typo3" <<'BASH'
 case "${TEST_DUMP:-complete}" in
     noisy) echo 'Unexpected shell output' ;;
-    ssh-error) exit 255 ;;
 esac
 environment=$(basename "$(dirname "$PWD")")
 printf '\n-- Dump of TYPO3 Connection "Default"\n'
@@ -274,16 +282,30 @@ check_db staging
 echo 'Testing failure paths before local changes'
 TEST_DUMP=noisy expect_failure 'dump is incomplete' pull -y
 TEST_DUMP=truncated expect_failure 'dump is incomplete' pull -y
-TEST_DUMP=ssh-error expect_failure "SSH to '$project' (Deployer host 'production') failed" pull -y
-grep -F 'IdentityFile ~/.ssh/<deployment-key>' "$work/failure.log"
-grep -F 'IdentitiesOnly yes' "$work/failure.log"
-grep -F "Host $project" "$work/failure.log"
+# Both a transport failure and a remote PHP fatal error may return 255.
+TEST_SSH_FAILURE=1 expect_failure 'Permission denied (publickey).' pull -y
+grep -F 'can indicate an SSH connection error or a failed remote command' "$work/failure.log"
 grep -E 'exit status 255$' "$work/failure.log"
+test ! -e "$dump"
+check_db staging
+for php_status in 255 1; do
+    TEST_PHP_FAILURE=$php_status expect_failure 'Composer detected issues in your platform:' pull -y
+    grep -F "If PHP failed, check bin/php for host 'production' in .hosts.yml" "$work/failure.log"
+    grep -E "exit status $php_status$" "$work/failure.log"
+    if grep -F "SSH to '$project'" "$work/failure.log" || grep -F "Host $project" "$work/failure.log"; then
+        fail 'remote PHP error must not be diagnosed as an SSH configuration failure'
+    fi
+    test ! -e "$dump"
+    check_db staging
+    [[ "$(cat "$fileadmin/from-server")" == staging ]]
+done
 # Wrong effective targets must stop before any remote transfer or local import.
 remote_calls_before=$(grep -c '^-T ' "$work/ssh.log")
 for mismatch in TEST_SSH_HOSTNAME=wrong.example.invalid TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
     expect_failure "SSH alias '$project' does not match Deployer host 'production'" env "$mismatch" "$TEST_DDEV" pull deployer -y
     grep -F "Host $project" "$work/failure.log"
+    grep -F 'IdentityFile ~/.ssh/<deployment-key>' "$work/failure.log"
+    grep -F 'IdentitiesOnly yes' "$work/failure.log"
 done
 [[ "$(grep -c '^-T ' "$work/ssh.log")" == "$remote_calls_before" ]]
 expect_failure "No absolute deploy_path for host 'invalid'" pull --environment=host=invalid -y
@@ -303,6 +325,9 @@ echo 'Testing an rsync failure, its exit status and a completed database import'
 TEST_RSYNC_FAILURE=1 expect_failure 'The mirror of public/fileadmin may be incomplete' pull --skip-db -y
 grep -F 'Illegal byte sequence (92)' "$work/failure.log"
 grep -E 'exit status 23$' "$work/failure.log"
+check_db staging
+TEST_RSYNC_FAILURE=1 TEST_RSYNC_STATUS=255 expect_failure 'can indicate an SSH connection error or a failed remote command' pull --skip-db -y
+grep -E 'exit status 255$' "$work/failure.log"
 check_db staging
 TEST_RSYNC_FAILURE=1 expect_failure 'Any database imported by this pull stays in place' pull -y
 check_db production

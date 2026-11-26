@@ -162,10 +162,15 @@ ddev pull deployer --skip-files --skip-import   # Fetch and validate a dump with
 
 DDEV runs the preflight before anything else and does not tell it about
 skip flags. So it always requires rsync, a valid host in `.hosts.yml` and
-valid upload destinations. If SSH fails, the provider names the target and
-shows the `Host` block above with a placeholder for the key. SSH disables a
-forced TTY and remote commands from `~/.ssh/config`. The export reads the
-`Default` connection and streams the dump over compressed SSH. Caches,
+valid upload destinations. If the SSH configuration does not match the
+selected host, the provider shows the `Host` block above with a placeholder
+for the key. Exit status 255 can indicate an SSH connection error or a
+failed remote command (including a PHP fatal error). Check the original
+error output; for a PHP error, verify the remote `bin/php` in `.hosts.yml`.
+The PHP version in the local DDEV container does not control the remote
+export. SSH disables a forced TTY and remote commands from `~/.ssh/config`.
+The export reads the `Default` connection and streams the dump over
+compressed SSH. Caches,
 sessions, `sys_log`, `sys_http_report` and `sys_file_processedfile` are
 excluded. Extra dump options belong in TYPO3 Console's configuration for
 `database:export`.
