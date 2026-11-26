@@ -12,16 +12,20 @@ existing SSH configuration, agent and host-key checks.
 
 ## Install, update and remove
 
-Use DDEV 1.25.0 or later. Run the same command to install or update from
-the `main` branch:
+Use DDEV 1.25.0 or later. Install or update to the latest stable GitHub
+release from your DDEV project directory.
 
 ```bash
-ddev add-on get ErHaWeb/ddev-typo3-deployer-pull --version main
+ddev add-on get ErHaWeb/ddev-typo3-deployer-pull
 ```
 
-The explicit branch works without GitHub Releases or a registry entry.
-DDEV's `--default-branch` option looks up the repository in its Add-on Registry.
-For a repeatable installation use `--version <commit-sha>`. Commit the
+To install a specific release, pass its tag.
+
+```bash
+ddev add-on get ErHaWeb/ddev-typo3-deployer-pull --version v1.0.0
+```
+
+Use `--version main` to try the current development branch. Commit the
 installed files and the generated add-on manifest to share the installation
 with your team.
 
