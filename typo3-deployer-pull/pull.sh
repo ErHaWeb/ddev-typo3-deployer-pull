@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-cd -P -- "${DDEV_APPROOT:?Run this script through ddev pull deployer}"
+cd -P -- "${DDEV_APPROOT:?Run this script through ddev pull typo3-deployer}"
 project_root=$PWD
 host=${host:?No Deployer host selected}
 ssh_host=${DDEV_PROJECT:?No DDEV project selected}

@@ -1,8 +1,9 @@
 # TYPO3 Deployer Pull for DDEV
 
 Refresh a local TYPO3 database and upload directories from an active Deployer
-release with `ddev pull deployer`. The provider runs on the host and uses your
-existing SSH configuration, agent and host-key checks. Database pulls use
+release with `ddev pull typo3-deployer`. Deployer itself does not run the pull;
+the provider uses its deployment layout. The provider runs on the host and
+uses your existing SSH configuration, agent and host-key checks. Database pulls use
 TYPO3 Console and the remote application's existing database connection;
 no separate database credentials or provider-specific API are required by
 this add-on.
@@ -25,7 +26,7 @@ ddev add-on get ErHaWeb/ddev-typo3-deployer-pull
 To install a specific release, pass its tag.
 
 ```bash
-ddev add-on get ErHaWeb/ddev-typo3-deployer-pull --version v1.0.1
+ddev add-on get ErHaWeb/ddev-typo3-deployer-pull --version v3.0.0
 ```
 
 Use `--version main` to try the current development branch. Commit the
@@ -38,7 +39,7 @@ DDEV replaces or removes installed files that still contain
 `#ddev-generated`. Remove that marker from each file you customize to keep
 your changes during updates and removal. The provider YAML calls the
 installed helper script. Keep both files together if you want an independent
-copy. If you already have a standalone `.ddev/providers/deployer.yaml`,
+copy. If you already have a standalone `.ddev/providers/typo3-deployer.yaml`,
 save it outside that directory before installing. DDEV preserves it in place
 until you move it.
 
@@ -210,15 +211,6 @@ from transfer and deletion. Other upload directories, including those outside
 the docroot, are still mirrored. If only `node_modules` entries are configured,
 the files step is a no-op.
 
-### Migrate from 1.0
-
-- **SSH:** Keep the existing project alias and SSH configuration. The
-  provider checks explicitly configured user and port against `.hosts.yml`.
-- **PHP:** 1.0 read `set('bin/php', ...)` from `deploy.php`. If the remote
-  CLI already uses the correct PHP version and configuration, no PHP setting
-  is needed for the provider. Otherwise move the override to `bin/php` in
-  `.hosts.yml` so that both Deployer and the provider use the same setting.
-
 ## Use
 
 ### Before you pull
@@ -241,12 +233,12 @@ the files step is a no-op.
 ### Pull commands
 
 ```bash
-ddev pull deployer                              # Production, prompts in an interactive terminal
-ddev pull deployer --environment=host=staging   # Select another Deployer host
-ddev pull deployer -y                           # Accept replacement without prompting
-ddev pull deployer --skip-files                 # Database only
-ddev pull deployer --skip-db                    # Files only
-ddev pull deployer --skip-files --skip-import   # Fetch and validate a dump without importing
+ddev pull typo3-deployer                               # Production, prompts in an interactive terminal
+ddev pull typo3-deployer --environment=host=staging    # Select another Deployer host
+ddev pull typo3-deployer -y                            # Accept replacement without prompting
+ddev pull typo3-deployer --skip-files                  # Database only
+ddev pull typo3-deployer --skip-db                     # Files only
+ddev pull typo3-deployer --skip-files --skip-import    # Fetch and validate a dump without importing
 ```
 
 DDEV runs the preflight before anything else and does not tell it about

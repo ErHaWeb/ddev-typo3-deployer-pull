@@ -118,20 +118,84 @@ fi
 get_addon() {
     "$TEST_DDEV" add-on get "$install_source" "$@"
 }
-provider=.ddev/providers/deployer.yaml
+provider=.ddev/providers/typo3-deployer.yaml
 copying=.ddev/typo3-deployer-pull/COPYING
 manifest=.ddev/addon-metadata/typo3-deployer-pull/manifest.yaml
 get_addon "$@"
-cmp "$provider" "$addon/providers/deployer.yaml"
+cmp "$provider" "$addon/providers/typo3-deployer.yaml"
 cmp "$copying" "$addon/typo3-deployer-pull/COPYING"
 tail -n +5 "$copying" | cmp - "$addon/LICENSE.txt"
 test -f "$manifest"
 "$TEST_DDEV" pull --help >"$work/help.log"
-assert_log_contains "$work/help.log" -F 'Pull with deployer'
+assert_log_contains "$work/help.log" -F 'Pull with typo3-deployer'
+if grep -Eq '^[[:space:]]+deployer[[:space:]]' "$work/help.log"; then
+    fail 'unexpected legacy provider on fresh install'
+fi
+begin_case 'Upgrade the legacy provider and remove only the managed old file'
+# Build a local fixture with the previous install manifest and provider name.
+# This works without Git history or network access (including release archives).
+legacy_addon="$work/legacy-addon"
+legacy_provider=.ddev/providers/deployer.yaml
+mkdir -p "$legacy_addon/providers"
+cp -R "$addon/typo3-deployer-pull" "$legacy_addon/"
+cp "$addon/providers/typo3-deployer.yaml" "$legacy_addon/providers/deployer.yaml"
+cat >"$legacy_addon/install.yaml" <<'YAML'
+name: typo3-deployer-pull
+ddev_version_constraint: '>= v1.25.0'
+project_files:
+  - providers/deployer.yaml
+  - typo3-deployer-pull/pull.sh
+  - typo3-deployer-pull/COPYING
+YAML
+"$TEST_DDEV" add-on remove typo3-deployer-pull
+"$TEST_DDEV" add-on get "$legacy_addon"
+test -f "$legacy_provider"
+test ! -e "$provider"
+get_addon "$@"
+test ! -e "$legacy_provider"
+cmp "$provider" "$addon/providers/typo3-deployer.yaml"
+assert_log_contains "$manifest" -F 'providers/typo3-deployer.yaml'
+if grep -Fq 'providers/deployer.yaml' "$manifest"; then
+    fail 'legacy provider still tracked in manifest'
+fi
+"$TEST_DDEV" pull --help >"$work/help.log"
+assert_log_contains "$work/help.log" -F 'Pull with typo3-deployer'
+if grep -Eq '^[[:space:]]+deployer[[:space:]]' "$work/help.log"; then
+    fail 'legacy provider still registered after upgrade'
+fi
+get_addon "$@"
+test ! -e "$legacy_provider"
+
+begin_case 'Preserve customized and unrelated legacy provider files during upgrade'
+sed '/^#ddev-generated$/d' "$legacy_addon/providers/deployer.yaml" >"$work/custom-legacy.yaml"
+cp "$work/custom-legacy.yaml" "$legacy_provider"
+get_addon "$@"
+cmp "$legacy_provider" "$work/custom-legacy.yaml"
+printf '#ddev-generated\n# Unrelated provider\n' >"$work/unrelated-legacy.yaml"
+cp "$work/unrelated-legacy.yaml" "$legacy_provider"
+get_addon "$@"
+cmp "$legacy_provider" "$work/unrelated-legacy.yaml"
+rm "$legacy_provider"
+ln -s "$work/custom-legacy.yaml" "$legacy_provider"
+get_addon "$@"
+test -L "$legacy_provider"
+cmp "$legacy_provider" "$work/custom-legacy.yaml"
+rm "$legacy_provider"
+
+begin_case 'Preserve the old managed provider when its replacement is customized'
+cp "$legacy_addon/providers/deployer.yaml" "$legacy_provider"
+sed '/^#ddev-generated$/d' "$provider" >"$work/custom-new.yaml"
+cp "$work/custom-new.yaml" "$provider"
+get_addon "$@"
+cmp "$legacy_provider" "$legacy_addon/providers/deployer.yaml"
+cmp "$provider" "$work/custom-new.yaml"
+rm "$provider"
+get_addon "$@"
+test ! -e "$legacy_provider"
 begin_case 'Update generated files and preserve customized provider files'
 echo '# managed test edit' >>"$provider"
 get_addon "$@"
-cmp "$provider" "$addon/providers/deployer.yaml"
+cmp "$provider" "$addon/providers/typo3-deployer.yaml"
 sed '/^#ddev-generated$/d' "$provider" >"$work/custom.yaml"
 echo '# protected test edit' >>"$work/custom.yaml"
 cp "$work/custom.yaml" "$provider"
@@ -287,7 +351,7 @@ printf "set('bin/php', '/deploy.php/is/not/read');\n" >deploy.php
 
 "$TEST_DDEV" start
 pull() {
-    "$TEST_DDEV" pull deployer "$@"
+    "$TEST_DDEV" pull typo3-deployer "$@"
 }
 
 db_value() {
@@ -303,7 +367,7 @@ mkdir -p "$fileadmin/_processed_" "$fileadmin/_temp_"
 touch "$fileadmin/_processed_/keep" "$fileadmin/_temp_/keep"
 
 begin_case 'Decline the confirmation prompt without changing local data'
-if printf 'n\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer >"$work/confirm.log" 2>&1; then
+if printf 'n\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull typo3-deployer >"$work/confirm.log" 2>&1; then
     fail 'the pull should be cancelled when the user declines'
 fi
 assert_log_contains "$work/confirm.log" -F 'Pull cancelled'
@@ -313,7 +377,7 @@ test -f "$fileadmin/local-only"
 # The fixture SSH alias resolves to a DNS name, while production declares
 # an IP address. Both database and file pulls must use the existing alias.
 begin_case 'Pull production database and files through the SSH alias; verify YAML merges, PHP flags and exclusions'
-printf 'y\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer
+printf 'y\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull typo3-deployer
 check_db production
 [[ "$(cat "$fileadmin/from-server")" == production ]]
 test ! -e "$fileadmin/local-only"
@@ -442,7 +506,7 @@ begin_case 'Reject SSH user or port mismatches before remote transfers'
 # Explicit user or port mismatches must stop before any remote transfer or local import.
 remote_calls_before=$(grep -c '^-T ' "$work/ssh.log")
 for mismatch in TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
-    expect_failure "SSH alias '$project' does not match Deployer host 'production'" env "$mismatch" "$TEST_DDEV" pull deployer -y
+    expect_failure "SSH alias '$project' does not match Deployer host 'production'" env "$mismatch" "$TEST_DDEV" pull typo3-deployer -y
     assert_log_contains "$work/failure.log" -F "Host $project"
     assert_log_contains "$work/failure.log" -F 'IdentityFile ~/.ssh/<deployment-key>'
     assert_log_contains "$work/failure.log" -F 'IdentitiesOnly yes'

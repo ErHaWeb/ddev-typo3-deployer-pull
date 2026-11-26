@@ -1,6 +1,25 @@
 name: typo3-deployer-pull
 ddev_version_constraint: '>= v1.25.0'
 project_files:
-  - providers/deployer.yaml
+  - providers/typo3-deployer.yaml
   - typo3-deployer-pull/pull.sh
   - typo3-deployer-pull/COPYING
+post_install_actions:
+  - |
+    #ddev-description: Migrate the former deployer provider
+    # DDEV runs post-install actions from the project's .ddev directory.
+    legacy=providers/deployer.yaml
+    replacement=providers/typo3-deployer.yaml
+    if [[ -L "$legacy" || -e "$legacy" ]]; then
+        if [[ ! -L "$legacy" && -f "$legacy" ]] &&
+            grep -Eq '^#ddev-generated[[:space:]]*$' "$legacy" &&
+            grep -Fq 'exec bash .ddev/typo3-deployer-pull/pull.sh ' "$legacy" &&
+            [[ ! -L "$replacement" && -f "$replacement" ]] &&
+            grep -Eq '^#ddev-generated[[:space:]]*$' "$replacement" &&
+            grep -Fq 'exec bash .ddev/typo3-deployer-pull/pull.sh ' "$replacement"; then
+            rm -- "$legacy"
+            echo 'Removed the managed providers/deployer.yaml. Use ddev pull typo3-deployer.'
+        else
+            echo 'Preserving providers/deployer.yaml; review it manually before using ddev pull typo3-deployer.'
+        fi
+    fi
