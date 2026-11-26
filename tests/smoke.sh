@@ -44,16 +44,24 @@ fail() {
     exit 1
 }
 
+# Log assertions should only print the captured output when they fail.
+assert_log_contains() {
+    local log=$1
+    shift
+    grep -q "$@" "$log" || {
+        cat "$log" >&2
+        fail "missing log match: $*"
+    }
+}
+
 expect_failure() {
     local message=$1
     shift
     if "$@" >"$work/failure.log" 2>&1; then
+        cat "$work/failure.log" >&2
         fail "expected failure: $*"
     fi
-    grep -F "$message" "$work/failure.log" || {
-        cat "$work/failure.log" >&2
-        fail "missing error: $message"
-    }
+    assert_log_contains "$work/failure.log" -F -- "$message"
 }
 
 mkdir -p "$work/project/public/fileadmin" "$work/bin" "$work/config/ddev"
@@ -85,7 +93,7 @@ cmp "$copying" "$addon/typo3-deployer-pull/COPYING"
 tail -n +5 "$copying" | cmp - "$addon/LICENSE.txt"
 test -f "$manifest"
 "$TEST_DDEV" pull --help >"$work/help.log"
-grep -F 'Pull with deployer' "$work/help.log"
+assert_log_contains "$work/help.log" -F 'Pull with deployer'
 echo '# managed test edit' >>"$provider"
 get_addon "$@"
 cmp "$provider" "$addon/providers/deployer.yaml"
@@ -259,7 +267,7 @@ echo 'Testing DDEV confirmation, combined pull, host override, skip flags and fi
 if printf 'n\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer >"$work/confirm.log" 2>&1; then
     fail 'the pull should be cancelled when the user declines'
 fi
-grep -F 'Pull cancelled' "$work/confirm.log"
+assert_log_contains "$work/confirm.log" -F 'Pull cancelled'
 test ! -e "$work/ssh.log"
 test ! -e "$work/typo3.log"
 test -f "$fileadmin/local-only"
@@ -279,12 +287,12 @@ test ! -e "$dump"
 printf '%s\n' 'typo3 --no-interaction help database:updateschema' 'typo3 --no-interaction database:updateschema safe' 'typo3 --no-interaction cache:flush' >"$work/expected-cli.log"
 cmp "$work/expected-cli.log" "$work/typo3.log"
 # The explicit remote_user wins over the merge key, as in the YAML spec.
-grep -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/production/current && $work/production/bin/php -d memory_limit=128M vendor/bin/typo3" "$work/ssh.log"
-grep -F -- "-T -o RemoteCommand=none $project rsync --server" "$work/ssh.log"
+assert_log_contains "$work/ssh.log" -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/production/current && $work/production/bin/php -d memory_limit=128M vendor/bin/typo3"
+assert_log_contains "$work/ssh.log" -F -- "-T -o RemoteCommand=none $project rsync --server"
 
 pull --skip-files --environment=host=staging --skip-confirmation
 check_db staging
-grep -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/staging/current &&" "$work/ssh.log"
+assert_log_contains "$work/ssh.log" -F -- "-T -o RemoteCommand=none -C -- $project cd -- $work/staging/current &&"
 [[ "$(cat "$fileadmin/from-server")" == production ]]
 pull --skip-db --environment=host=staging -y
 check_db staging
@@ -308,15 +316,16 @@ TEST_DUMP=noisy expect_failure 'dump is incomplete' pull -y
 TEST_DUMP=truncated expect_failure 'dump is incomplete' pull -y
 # Both a transport failure and a remote PHP fatal error may return 255.
 TEST_SSH_FAILURE=1 expect_failure 'Permission denied (publickey).' pull -y
-grep -F 'can indicate an SSH connection error or a failed remote command' "$work/failure.log"
-grep -E 'exit status 255$' "$work/failure.log"
+assert_log_contains "$work/failure.log" -F 'can indicate an SSH connection error or a failed remote command'
+assert_log_contains "$work/failure.log" -E 'exit status 255$'
 test ! -e "$dump"
 check_db staging
 for php_status in 255 1; do
     TEST_PHP_FAILURE=$php_status expect_failure 'Composer detected issues in your platform:' pull -y
-    grep -F "If PHP failed, check the remote CLI PHP environment or bin/php for host 'production' in .hosts.yml" "$work/failure.log"
-    grep -E "exit status $php_status$" "$work/failure.log"
-    if grep -F "SSH to '$project'" "$work/failure.log" || grep -F "Host $project" "$work/failure.log"; then
+    assert_log_contains "$work/failure.log" -F "If PHP failed, check the remote CLI PHP environment or bin/php for host 'production' in .hosts.yml"
+    assert_log_contains "$work/failure.log" -E "exit status $php_status$"
+    if grep -Fq "SSH to '$project'" "$work/failure.log" || grep -Fq "Host $project" "$work/failure.log"; then
+        cat "$work/failure.log" >&2
         fail 'remote PHP error must not be diagnosed as an SSH configuration failure'
     fi
     test ! -e "$dump"
@@ -384,9 +393,9 @@ rmdir .git
 remote_calls_before=$(grep -c '^-T ' "$work/ssh.log")
 for mismatch in TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
     expect_failure "SSH alias '$project' does not match Deployer host 'production'" env "$mismatch" "$TEST_DDEV" pull deployer -y
-    grep -F "Host $project" "$work/failure.log"
-    grep -F 'IdentityFile ~/.ssh/<deployment-key>' "$work/failure.log"
-    grep -F 'IdentitiesOnly yes' "$work/failure.log"
+    assert_log_contains "$work/failure.log" -F "Host $project"
+    assert_log_contains "$work/failure.log" -F 'IdentityFile ~/.ssh/<deployment-key>'
+    assert_log_contains "$work/failure.log" -F 'IdentitiesOnly yes'
 done
 [[ "$(grep -c '^-T ' "$work/ssh.log")" == "$remote_calls_before" ]]
 expect_failure "No absolute deploy_path for host 'invalid'" pull --environment=host=invalid -y
@@ -404,11 +413,11 @@ mv "$work/outside" "$fileadmin"
 
 echo 'Testing an rsync failure, its exit status and a completed database import'
 TEST_RSYNC_FAILURE=1 expect_failure 'The mirror of public/fileadmin may be incomplete' pull --skip-db -y
-grep -F 'Illegal byte sequence (92)' "$work/failure.log"
-grep -E 'exit status 23$' "$work/failure.log"
+assert_log_contains "$work/failure.log" -F 'Illegal byte sequence (92)'
+assert_log_contains "$work/failure.log" -E 'exit status 23$'
 check_db staging
 TEST_RSYNC_FAILURE=1 TEST_RSYNC_STATUS=255 expect_failure 'can indicate an SSH connection error or a failed remote command' pull --skip-db -y
-grep -E 'exit status 255$' "$work/failure.log"
+assert_log_contains "$work/failure.log" -E 'exit status 255$'
 check_db staging
 TEST_RSYNC_FAILURE=1 expect_failure 'Any database imported by this pull stays in place' pull -y
 check_db production
@@ -440,7 +449,7 @@ echo 'Testing all remote file sources before mirroring any local destination'
 touch "$fileadmin/preflight-keep"
 mv "$work/staging/current/shared-uploads" "$work/staging/missing-uploads"
 expect_failure 'Remote upload directory does not exist:' pull --skip-db --environment=host=staging -y
-grep -F 'No upload directories have been mirrored in this step.' "$work/failure.log"
+assert_log_contains "$work/failure.log" -F 'No upload directories have been mirrored in this step.'
 test -f "$fileadmin/preflight-keep"
 # A missing remote upload directory must not block a database-only pull.
 pull --skip-files --environment=host=staging -y
@@ -469,13 +478,14 @@ printf '%s\n' local >public/fileadmin/node_modules/keep
 # also survive the parent fileadmin mirror with --delete.
 : >"$work/ssh.log"
 pull --skip-db --environment=host=staging -y >"$work/node-modules.log" 2>&1
-grep -F 'Skipping dependency directory: node_modules' "$work/node-modules.log"
-grep -F 'Skipping dependency directory: public/assets/node_modules' "$work/node-modules.log"
+assert_log_contains "$work/node-modules.log" -F 'Skipping dependency directory: node_modules'
+assert_log_contains "$work/node-modules.log" -F 'Skipping dependency directory: public/assets/node_modules'
 [[ "$(cat node_modules/keep)" == local ]]
 [[ "$(cat public/assets/node_modules/keep)" == local ]]
 [[ "$(cat public/fileadmin/node_modules/keep)" == local ]]
 [[ "$(cat shared-uploads/from-server)" == staging ]]
-if grep -F '/node_modules/' "$work/ssh.log"; then
+if grep -Fq '/node_modules/' "$work/ssh.log"; then
+    cat "$work/ssh.log" >&2
     fail 'node_modules must not be a remote source directory'
 fi
 # Existing remote dependencies must not overwrite local dependencies either.
@@ -490,7 +500,8 @@ printf 'upload_dirs:\n  - ../node_modules\n' >.ddev/config.uploads.yaml
 : >"$work/ssh.log"
 pull --skip-db --environment=host=staging -y
 [[ "$(cat node_modules/keep)" == local ]]
-if grep -F 'rsync --server' "$work/ssh.log"; then
+if grep -Fq 'rsync --server' "$work/ssh.log"; then
+    cat "$work/ssh.log" >&2
     fail 'a dependency-only upload list must not invoke rsync'
 fi
 check_db production
@@ -532,7 +543,7 @@ chmod +x "$work/bin/php"
 printf '<?php echo "fixture";\n' >index.php
 pull --skip-files -y
 check_db production
-grep -F -- "cd -- $work/production/current && vendor/bin/typo3 --no-interaction database:export" "$work/ssh.log"
+assert_log_contains "$work/ssh.log" -F -- "cd -- $work/production/current && vendor/bin/typo3 --no-interaction database:export"
 pull --skip-db -y
 test -f fileadmin/root-docroot
 
