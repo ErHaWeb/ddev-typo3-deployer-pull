@@ -2,7 +2,10 @@
 
 Refresh a local TYPO3 database and upload directories from an active Deployer
 release with `ddev pull deployer`. The provider runs on the host and uses your
-existing SSH configuration, agent and host-key checks.
+existing SSH configuration, agent and host-key checks. Database pulls use
+TYPO3 Console and the remote application's existing database connection;
+no separate database credentials or provider-specific API are required by
+this add-on.
 
 > [!WARNING]
 > **Use this add-on at your own risk. A pull can permanently destroy local data.**
@@ -50,13 +53,29 @@ until you move it.
 
 ### Why TYPO3 Console is required
 
+TYPO3 Console (`helhum/typo3-console`) enables database pulls without
+separately configuring database credentials in the provider. The add-on
+uses the existing SSH connection to run the TYPO3 CLI on the deployment
+server. TYPO3 Console uses the database connection settings resolved by
+TYPO3 at runtime, regardless of whether the project configures them through
+PHP configuration files or environment variables.
+
+The provider does not read or transfer database credentials, maintain a
+separate `.my.cnf`, or depend on a hosting provider's API. The existing
+TYPO3 installation remains the single source of truth for database access.
+This follows Convention over Configuration and separation of concerns:
+OpenSSH authenticates access to the server, TYPO3 provides the database
+connection settings, and TYPO3 Console handles the database export.
+A compatible MySQL or MariaDB dump client must still be available remotely.
+
 TYPO3 Console extends the native TYPO3 CLI with the two database commands
 used by this provider:
 
 - **Remote:** [`database:export`](https://docs.typo3.org/p/helhum/typo3-console/main/en-us/CommandReference/DatabaseExport.html)
-  exports the `Default` connection using TYPO3's database configuration and
-  allows the provider to exclude volatile tables such as caches and sessions. This avoids separate
-  database credentials or custom dump-client configuration in the provider.
+  exports the `Default` database connection using TYPO3's resolved connection
+  settings and allows the provider to exclude volatile tables such as caches
+  and sessions. TYPO3 Core's `impexp:export` exports records, not a complete
+  SQL database dump, and is not a substitute for this command.
 - **Local:** [`database:updateschema safe`](https://docs.typo3.org/p/helhum/typo3-console/main/en-us/CommandReference/DatabaseUpdateschema.html)
   reconciles the imported database with the local code using add/change
   operations, without explicit rename/drop operations. It does not initialize
