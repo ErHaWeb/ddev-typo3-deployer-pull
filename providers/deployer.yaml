@@ -1,0 +1,24 @@
+#ddev-generated
+# SPDX-FileCopyrightText: 2026 Eric Harrer
+# SPDX-License-Identifier: GPL-2.0-or-later
+#ddev-silent-no-warn
+# TYPO3 Deployer pull provider.
+
+environment_variables:
+  host: production
+
+auth_command:
+  service: host
+  command: exec bash .ddev/typo3-deployer-pull/pull.sh check
+
+db_pull_command:
+  service: host
+  command: exec bash .ddev/typo3-deployer-pull/pull.sh export-db
+
+db_import_command:
+  service: host
+  command: exec bash .ddev/typo3-deployer-pull/pull.sh import-db
+
+files_import_command:
+  service: host
+  command: exec bash .ddev/typo3-deployer-pull/pull.sh mirror-files
