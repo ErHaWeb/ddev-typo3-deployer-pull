@@ -22,7 +22,7 @@ check_programs() {
     for program in ddev ssh rsync; do
         command -v "$program" >/dev/null || missing="$missing $program"
     done
-    [[ -z "$missing" ]] || die "Missing on this machine:$missing. Nothing has been imported."
+    [[ -z "$missing" ]] || die "Missing on this machine:$missing. Install the missing host tools and retry. Nothing has been imported."
 }
 
 # Deployer runs only in CI. Read the selected host from .hosts.yml with the yq
@@ -30,12 +30,14 @@ check_programs() {
 # and Deployer do. The PHP override is optional; the CLI normally selects PHP.
 read_deployment() {
     local values
+    [[ -f .hosts.yml && -r .hosts.yml ]] \
+        || die "Cannot read .hosts.yml in the DDEV project root ($project_root). Make your Deployer host configuration available there."
     values=$(ddev exec --raw -- env "DEPLOYER_HOST=$host" yq --yaml-fix-merge-anchor-to-spec=true '
         .hosts[strenv(DEPLOYER_HOST)]
         | [.["bin/php"], .deploy_path, .remote_user, .port, .hostname // strenv(DEPLOYER_HOST)]
         | map((. // "") | to_string | select(test("^[^\\x00-\\x1f\\x7f]*$")))
         | select(length == 5) | .[]
-        ' /var/www/html/.hosts.yml) || die "Could not read .hosts.yml with the yq of the DDEV web container."
+        ' /var/www/html/.hosts.yml) || die "Could not read .hosts.yml with the yq of the DDEV web container. Check the YAML syntax and use a supported DDEV version (see the README)."
     { IFS= read -r php_command && IFS= read -r deploy_path && IFS= read -r ssh_user &&
         IFS= read -r ssh_port && IFS= read -r ssh_hostname; } <<< "$values" \
         || die "The settings of host '$host' in .hosts.yml must be single-line values."
@@ -61,9 +63,9 @@ check_remote_path() {
 }
 
 explain_ssh_configuration() {
-    printf '%s\n' "Check the existing SSH alias in ~/.ssh/config:" "" \
+    printf '%s\n' "Check the existing SSH alias in ~/.ssh/config (example; keep your working hostname and key):" "" \
         "Host $ssh_host" \
-        "    HostName $ssh_hostname" \
+        "    HostName ${1:-$ssh_hostname}" \
         "    User ${ssh_user:-<deployment-user>}" \
         "    Port ${ssh_port:-22}" \
         "    IdentityFile ~/.ssh/<deployment-key>" \
@@ -91,9 +93,14 @@ check_ssh_configuration() {
         || [[ -n "$ssh_port" && "$port" != "$ssh_port" ]]; then
         printf '%s\n' "SSH alias '$ssh_host' does not match Deployer host '$host'." \
             "Effective SSH target: $user@$hostname port $port" >&2
-        explain_ssh_configuration
+        [[ -z "$ssh_user" || "$user" == "$ssh_user" ]] \
+            || printf 'Expected SSH user from .hosts.yml: %s\n' "$ssh_user" >&2
+        [[ -z "$ssh_port" || "$port" == "$ssh_port" ]] \
+            || printf 'Expected SSH port from .hosts.yml: %s\n' "$ssh_port" >&2
+        explain_ssh_configuration "$hostname"
         die "The pull stopped before importing any data in this step."
     fi
+    effective_ssh_target="$user@$hostname (port $port)"
 }
 
 # SSH uses 255 for transport errors but also forwards remote exit statuses.
@@ -120,7 +127,7 @@ resolve_upload_directory() (
 read_upload_directories() {
     local path resolved previous
     local -a paths destinations=()
-    [[ -n "${DDEV_FILES_DIRS:-}" ]] || die "DDEV lists no upload directory. Check upload_dirs."
+    [[ -n "${DDEV_FILES_DIRS:-}" ]] || die "DDEV lists no upload directory. Check upload_dirs in .ddev/config.yaml and its overrides, then run ddev restart."
     IFS=, read -r -a paths <<< "$DDEV_FILES_DIRS"
     upload_directories=()
     for path in "${paths[@]}"; do
@@ -151,7 +158,7 @@ read_upload_directories() {
 # DDEV does not expose skip flags there, and database-only pulls need no files.
 check_remote_upload_directories() {
     local directory command status
-    [[ -n "${upload_directories[0]:-}" ]] || return 0
+    echo "Checking remote upload directories before synchronizing files ..."
     command="command -v rsync >/dev/null || { echo 'rsync is not available on the deployment server.' >&2; exit 1; };"
     for directory in "${upload_directories[@]}"; do
         command+=" test -d $deploy_path/current/$directory || { echo 'Remote upload directory does not exist: $deploy_path/current/$directory' >&2; exit 1; };"
@@ -160,7 +167,8 @@ check_remote_upload_directories() {
         status=$?
         explain_status_255 "$status"
         printf '%s\n' 'Remote file preflight failed. No upload directories have been mirrored in this step.' \
-            'Any database imported by this pull stays in place. After fixing the cause, repeat with --skip-db.' >&2
+            'Check rsync on the server, DDEV upload_dirs and the selected release.' \
+            'Any database imported by this pull stays in place. After fixing the cause, repeat the same pull with --skip-db (keep the selected host).' >&2
         exit "$status"
     }
 }
@@ -171,7 +179,8 @@ check_local_cli() {
         status=$?
         printf '%s\n' "The local TYPO3 CLI cannot provide 'database:updateschema'." \
             'Check the local PHP version, Composer installation and helhum/typo3-console, which provides the schema update command.' \
-            'The database has not been imported.' >&2
+            'The database has not been imported.' \
+            'If you need to keep the downloaded dump, save it securely outside .ddev/.downloads before another pull.' >&2
         exit "$status"
     }
 }
@@ -194,7 +203,7 @@ mirror_upload_directory() (
         status=$?
         explain_status_255 "$status"
         printf '%s\n' "The mirror of $1 may be incomplete. Any database imported by this pull stays in place." \
-            "After fixing the cause above, repeat the pull with --skip-db." >&2
+            "After fixing the cause above, repeat the same pull with --skip-db (keep the selected host)." >&2
         exit "$status"
     }
 )
@@ -205,6 +214,8 @@ case "${1:-}" in
         read_deployment
         check_ssh_configuration
         read_upload_directories >/dev/null
+        printf 'Local DDEV project: %s\nSelected Deployer host: %s\nSSH target via %s: %s\nRemote release: %s/current\n' \
+            "$DDEV_PROJECT" "$host" "$ssh_host" "$effective_ssh_target" "$deploy_path"
         ;;
     export-db)
         read_deployment
@@ -232,35 +243,46 @@ case "${1:-}" in
         exec 3>&-
         validate_dump
         trap - EXIT
+        echo "Database export validated."
         ;;
     import-db)
         validate_dump
+        echo "Checking local TYPO3 CLI for schema updates ..."
         check_local_cli
+        echo "Replacing the local database ..."
         ddev import-db --file="$dump" || {
             status=$?
             printf '%s\n' "Database import failed. The local database may be incomplete. Dump retained: $dump" >&2
             exit "$status"
         }
+        echo "Updating the local database schema (add/change operations) ..."
         ddev typo3 --no-interaction database:updateschema safe || {
             status=$?
             printf '%s\n' "Database imported, but schema update failed. Dump retained: $dump" >&2
             exit "$status"
         }
+        echo "Flushing local TYPO3 caches ..."
         ddev typo3 --no-interaction cache:flush || {
             status=$?
             printf '%s\n' "Database imported and schema updated, but cache flush failed. Dump retained: $dump" >&2
             exit "$status"
         }
         rm -- "$dump"
+        echo "Database import and TYPO3 preparation complete."
         ;;
     mirror-files)
         read_deployment
         check_ssh_configuration
         read_upload_directories
+        if [[ -z "${upload_directories[0]:-}" ]]; then
+            echo "No upload directories to synchronize after excluding node_modules."
+            exit 0
+        fi
         check_remote_upload_directories
         for directory in ${upload_directories[@]+"${upload_directories[@]}"}; do
             mirror_upload_directory "$directory"
         done
+        echo "Upload directory synchronization complete."
         ;;
     *)
         die "Unknown pull step: ${1:-}"

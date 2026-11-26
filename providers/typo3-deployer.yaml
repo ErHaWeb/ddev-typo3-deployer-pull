@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Eric Harrer
 # SPDX-License-Identifier: GPL-2.0-or-later
 #ddev-silent-no-warn
-# TYPO3 Deployer pull provider.
+# Pull database and uploads from a TYPO3 Deployer release.
+# All remote access uses the host SSH configuration, not the web container.
 
+# Select another .hosts.yml entry with --environment=host=staging.
 environment_variables:
   host: production
 
+# DDEV runs this check even when a pull step is skipped.
 auth_command:
   service: host
   command: exec bash .ddev/typo3-deployer-pull/pull.sh check
@@ -15,10 +18,12 @@ db_pull_command:
   service: host
   command: exec bash .ddev/typo3-deployer-pull/pull.sh export-db
 
+# Import and prepare the local TYPO3 database.
 db_import_command:
   service: host
   command: exec bash .ddev/typo3-deployer-pull/pull.sh import-db
 
+# Mirror the upload directories directly; no intermediate file archive.
 files_import_command:
   service: host
   command: exec bash .ddev/typo3-deployer-pull/pull.sh mirror-files

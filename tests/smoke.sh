@@ -6,8 +6,9 @@ set -euo pipefail
 addon=$(cd "$(dirname "$0")/.." && pwd -P)
 export TEST_DDEV
 export TEST_RSYNC
-TEST_DDEV=$(command -v ddev)
-TEST_RSYNC=${TEST_RSYNC:-$(command -v rsync)}
+TEST_DDEV=$(command -v ddev) || { echo 'Smoke tests require DDEV on the host. See the README.' >&2; exit 1; }
+TEST_RSYNC=${TEST_RSYNC:-rsync}
+TEST_RSYNC=$(command -v "$TEST_RSYNC") || { echo 'Smoke tests require rsync (or an executable TEST_RSYNC override).' >&2; exit 1; }
 
 work=$(mktemp -d /tmp/deployer-pull.XXXXXXXX)
 project="deployer-pull-${work##*.}"
@@ -377,7 +378,16 @@ test -f "$fileadmin/local-only"
 # The fixture SSH alias resolves to a DNS name, while production declares
 # an IP address. Both database and file pulls must use the existing alias.
 begin_case 'Pull production database and files through the SSH alias; verify YAML merges, PHP flags and exclusions'
-printf 'y\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull typo3-deployer
+printf 'y\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull typo3-deployer >"$work/first-pull.log" 2>&1 || { cat "$work/first-pull.log" >&2; fail 'combined pull failed'; }
+for message in "Local DDEV project: $project" 'Selected Deployer host: production' \
+    "SSH target via $project: release@deployment.example.invalid (port 2222)" \
+    "Remote release: $work/production/current" 'Database export validated.' \
+    'Checking local TYPO3 CLI for schema updates' 'Replacing the local database' \
+    'Updating the local database schema' 'Flushing local TYPO3 caches' \
+    'Database import and TYPO3 preparation complete.' \
+    'Checking remote upload directories' 'Upload directory synchronization complete.'; do
+    assert_log_contains "$work/first-pull.log" -F "$message"
+done
 check_db production
 [[ "$(cat "$fileadmin/from-server")" == production ]]
 test ! -e "$fileadmin/local-only"
@@ -510,8 +520,20 @@ for mismatch in TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
     assert_log_contains "$work/failure.log" -F "Host $project"
     assert_log_contains "$work/failure.log" -F 'IdentityFile ~/.ssh/<deployment-key>'
     assert_log_contains "$work/failure.log" -F 'IdentitiesOnly yes'
+    assert_log_contains "$work/failure.log" -F 'HostName deployment.example.invalid'
+    case "$mismatch" in
+        TEST_SSH_USER=*) assert_log_contains "$work/failure.log" -F 'Expected SSH user from .hosts.yml: release' ;;
+        TEST_SSH_PORT=*) assert_log_contains "$work/failure.log" -F 'Expected SSH port from .hosts.yml: 2222' ;;
+    esac
 done
 [[ "$(grep -c '^-T ' "$work/ssh.log")" == "$remote_calls_before" ]]
+begin_case 'Reject a missing Deployer host configuration with an actionable hint'
+mv .hosts.yml "$work/hosts.saved"
+expect_failure 'Cannot read .hosts.yml in the DDEV project root' pull -y
+assert_log_contains "$work/failure.log" -F 'Make your Deployer host configuration available there.'
+mv "$work/hosts.saved" .hosts.yml
+check_db staging
+
 begin_case 'Reject unknown hosts and template-only host definitions'
 expect_failure "No absolute deploy_path for host 'invalid'" pull --environment=host=invalid -y
 expect_failure "No absolute deploy_path for host '.base'" pull --environment=host=.base -y
@@ -617,7 +639,8 @@ test ! -e public/fileadmin/node_modules/remote-only
 begin_case 'Complete a dependency-only file pull without invoking rsync'
 printf 'upload_dirs:\n  - ../node_modules\n' >.ddev/config.uploads.yaml
 : >"$work/ssh.log"
-pull --skip-db --environment=host=staging -y
+pull --skip-db --environment=host=staging -y >"$work/dependency-only.log" 2>&1 || { cat "$work/dependency-only.log" >&2; fail 'dependency-only pull failed'; }
+assert_log_contains "$work/dependency-only.log" -F 'No upload directories to synchronize after excluding node_modules.'
 [[ "$(cat node_modules/keep)" == local ]]
 if grep -Fq 'rsync --server' "$work/ssh.log"; then
     cat "$work/ssh.log" >&2
