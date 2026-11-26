@@ -109,7 +109,8 @@ and `port` must not contain whitespace.
 
 Each `<deploy_path>/current` must have `vendor/bin/typo3` and the upload
 directories at the same paths relative to the project root as in DDEV.
-The provider mirrors DDEV's effective `upload_dirs`. TYPO3 defaults to
+The provider mirrors DDEV's effective `upload_dirs`, except directories
+named `node_modules`. TYPO3 defaults to
 `fileadmin` when no custom list is configured. To also mirror `uploads`,
 configure both directories in `.ddev/config.yaml`:
 
@@ -122,6 +123,14 @@ upload_dirs:
 DDEV resolves these paths relative to the docroot. Each local destination
 must already exist and resolve to a directory inside the project that does
 not overlap with another upload directory.
+
+DDEV also uses `upload_dirs` to exclude directories from Mutagen syncing.
+Entries named `node_modules` (for example `../node_modules` with a `public`
+docroot) are skipped automatically, even if they do not exist on the server.
+Nested `node_modules` directories within mirrored uploads are also excluded
+from transfer and deletion. Other upload directories, including those outside
+the docroot, are still mirrored. If only `node_modules` entries are configured,
+the files step is a no-op.
 
 ### Migrate from 1.0
 
@@ -184,7 +193,7 @@ runs and `--skip-import` can leave a restricted-permission dump at
 `.ddev/.downloads/db.sql`. Treat it and the imported data as sensitive.
 
 Rsync mirrors content, timestamps and safe symlinks. It deletes local files
-absent upstream. It leaves `_processed_/` and `_temp_/` alone and uses local
+absent upstream. It leaves `_processed_/`, `_temp_/` and `node_modules/` alone and uses local
 ownership and permission defaults. Run one pull at a time
 per project. The provider handles a single database connection and the
 upload directories listed by DDEV.

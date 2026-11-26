@@ -120,6 +120,13 @@ read_upload_directories() {
     upload_directories=()
     for path in "${paths[@]}"; do
         path=${path#/var/www/html/}
+        # DDEV also uses upload_dirs for Mutagen exclusions such as node_modules.
+        case "$path" in
+            node_modules|*/node_modules)
+                printf 'Skipping dependency directory: %s\n' "$path"
+                continue
+                ;;
+        esac
         [[ "$path" != /* ]] || die "Upload directory '$path' must lie inside the project."
         check_remote_path "$path"
         resolved=$(resolve_upload_directory "$path") || exit 1
@@ -144,7 +151,7 @@ mirror_upload_directory() (
     destination=$(resolve_upload_directory "$1") || exit 1
     cd -P -- "$destination"
     echo "Mirroring $1 of $host ($deploy_path) ..."
-    rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ -e "ssh ${ssh_options[*]}" \
+    rsync -rltz --safe-links --delete --exclude=_processed_/ --exclude=_temp_/ --exclude=node_modules/ -e "ssh ${ssh_options[*]}" \
         -- "$ssh_host:$deploy_path/current/$1/" ./ || {
         status=$?
         explain_status_255 "$status"
@@ -159,7 +166,7 @@ case "${1:-}" in
         check_programs
         read_deployment
         check_ssh_configuration
-        read_upload_directories
+        read_upload_directories >/dev/null
         ;;
     export-db)
         read_deployment
@@ -191,7 +198,7 @@ case "${1:-}" in
         read_deployment
         check_ssh_configuration
         read_upload_directories
-        for directory in "${upload_directories[@]}"; do
+        for directory in ${upload_directories[@]+"${upload_directories[@]}"}; do
             mirror_upload_directory "$directory"
         done
         ;;

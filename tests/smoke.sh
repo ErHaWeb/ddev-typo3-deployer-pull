@@ -355,6 +355,48 @@ check_db production
 test ! -e public/uploads/local-only
 test ! -e shared-uploads/local-only
 
+echo 'Testing node_modules exclusions, including nested directories and dependency-only lists'
+cat >.ddev/config.uploads.yaml <<'YAML'
+upload_dirs:
+  - fileadmin
+  - ../shared-uploads
+  - ../node_modules
+  - assets/node_modules
+YAML
+mkdir -p node_modules public/assets/node_modules public/fileadmin/node_modules
+printf '%s\n' local >node_modules/keep
+printf '%s\n' local >public/assets/node_modules/keep
+printf '%s\n' local >public/fileadmin/node_modules/keep
+# Neither excluded entry needs to exist remotely. The nested directory must
+# also survive the parent fileadmin mirror with --delete.
+: >"$work/ssh.log"
+pull --skip-db --environment=host=staging -y >"$work/node-modules.log" 2>&1
+grep -F 'Skipping dependency directory: node_modules' "$work/node-modules.log"
+grep -F 'Skipping dependency directory: public/assets/node_modules' "$work/node-modules.log"
+[[ "$(cat node_modules/keep)" == local ]]
+[[ "$(cat public/assets/node_modules/keep)" == local ]]
+[[ "$(cat public/fileadmin/node_modules/keep)" == local ]]
+[[ "$(cat shared-uploads/from-server)" == staging ]]
+if grep -F '/node_modules/' "$work/ssh.log"; then
+    fail 'node_modules must not be a remote source directory'
+fi
+# Existing remote dependencies must not overwrite local dependencies either.
+mkdir -p "$work/staging/current/public/fileadmin/node_modules"
+printf '%s\n' remote >"$work/staging/current/public/fileadmin/node_modules/keep"
+touch "$work/staging/current/public/fileadmin/node_modules/remote-only"
+pull --skip-db --environment=host=staging -y
+[[ "$(cat public/fileadmin/node_modules/keep)" == local ]]
+test ! -e public/fileadmin/node_modules/remote-only
+
+printf 'upload_dirs:\n  - ../node_modules\n' >.ddev/config.uploads.yaml
+: >"$work/ssh.log"
+pull --skip-db --environment=host=staging -y
+[[ "$(cat node_modules/keep)" == local ]]
+if grep -F 'rsync --server' "$work/ssh.log"; then
+    fail 'a dependency-only upload list must not invoke rsync'
+fi
+check_db production
+
 # Remote paths reach the remote shell unquoted, so they are refused early.
 mkdir 'shared uploads'
 printf 'upload_dirs:\n  - fileadmin\n  - "../shared uploads"\n' >.ddev/config.uploads.yaml
