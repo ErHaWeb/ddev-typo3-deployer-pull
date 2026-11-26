@@ -108,7 +108,7 @@ get_addon "$@"
 
 # Fail rsync lookup with a private PATH, without modifying host executables.
 mkdir "$work/no-rsync"
-for program in ddev ssh awk sed tr head tail rm; do
+for program in ddev ssh awk sed tr head tail cat grep mktemp rm; do
     ln -s "$(command -v "$program")" "$work/no-rsync/$program"
 done
 expect_failure 'Missing on this machine: rsync' env PATH="$work/no-rsync" \
@@ -129,6 +129,18 @@ BASH
 cat >"$work/bin/ssh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$1" == '-G' ]]; then
+    shift
+    if [[ "$1" == '-F' ]]; then
+        [[ "$2" == /dev/null ]]
+        printf 'hostname %s\nuser local-user\nport 22\nidentitiesonly no\n' "$TEST_PROJECT"
+    elif [[ "${TEST_SSH_CONFIG:-configured}" == defaults ]]; then
+        printf 'hostname %s\nuser local-user\nport 22\nidentitiesonly yes\n' "$TEST_PROJECT"
+    else
+        printf 'hostname %s\nuser deployment-user\nport 22\nidentitiesonly yes\n' "$TEST_PROJECT"
+    fi
+    exit 0
+fi
 [[ "$1 $2 $3" == '-T -o RemoteCommand=none' ]]
 shift 3
 if [[ "$1" == '-C' ]]; then
@@ -139,10 +151,25 @@ if [[ "$1" == '--' ]]; then
 fi
 [[ "$1" == "$TEST_PROJECT" && "$#" -ge 2 ]]
 shift
+touch "$TEST_WORK/ssh-connection"
 exec /bin/sh -c "$*"
 BASH
-ln -s "$TEST_RSYNC" "$work/bin/rsync"
-chmod +x "$work/bin/ddev" "$work/bin/ssh"
+cat >"$work/bin/rsync" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${TEST_RSYNC_FAILURE:-}" in
+    filename)
+        printf '%s\n' "rsync: [receiver] mkstemp failed: Illegal byte sequence (92)" >&2
+        exit 23
+        ;;
+    basis)
+        printf '%s\n' "got a block match with no basis file for fixture.png [receiver]" >&2
+        exit 2
+        ;;
+esac
+exec "$TEST_RSYNC" "$@"
+BASH
+chmod +x "$work/bin/ddev" "$work/bin/ssh" "$work/bin/rsync"
 export PATH="$work/bin:$PATH"
 
 for environment in production staging; do
@@ -198,6 +225,13 @@ touch "$fileadmin/local-only"
 mkdir -p "$fileadmin/_processed_" "$fileadmin/_temp_"
 touch "$fileadmin/_processed_/keep" "$fileadmin/_temp_/keep"
 
+echo 'Testing SSH defaults without a deployment destination or identity'
+TEST_SSH_CONFIG=defaults expect_failure 'SSH has no deployment destination or identity configured' pull -y
+grep -F "Host $TEST_PROJECT" "$work/failure.log"
+test ! -e "$work/ssh-connection"
+test ! -e "$work/typo3.log"
+test -f "$fileadmin/local-only"
+
 echo 'Testing DDEV confirmation, combined pull, host override, skip flags and file mirroring'
 if printf 'n\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer >"$work/confirm.log" 2>&1; then
     fail 'the pull should be cancelled when the user declines'
@@ -241,7 +275,8 @@ check_db staging
 echo 'Testing failure paths before local changes'
 TEST_DUMP=noisy expect_failure 'dump is incomplete' pull -y
 TEST_DUMP=truncated expect_failure 'dump is incomplete' pull -y
-TEST_DUMP=ssh-error expect_failure 'exit status 255' pull -y
+TEST_DUMP=ssh-error expect_failure 'The SSH session for' pull -y
+grep -E 'exit status 255$' "$work/failure.log"
 expect_failure 'No usable deploy_path' pull --environment=host=invalid -y
 check_db staging
 [[ "$(cat "$fileadmin/from-server")" == staging ]]
@@ -253,6 +288,18 @@ check_db staging
 test -f "$work/outside/from-server"
 rm "$fileadmin"
 mv "$work/outside" "$fileadmin"
+
+echo 'Testing rsync diagnostics, exit status and a completed database import'
+TEST_RSYNC_FAILURE=filename expect_failure 'The local filesystem rejected a filename' pull --skip-db -y
+grep -F 'Illegal byte sequence (92)' "$work/failure.log"
+grep -E 'exit status 23$' "$work/failure.log"
+check_db staging
+TEST_RSYNC_FAILURE=basis expect_failure 'rsync could not use a local reference file' pull -y
+grep -F 'got a block match with no basis file' "$work/failure.log"
+grep -E 'exit status 2$' "$work/failure.log"
+grep -F 'Any database already imported by this pull stays in place' "$work/failure.log"
+check_db production
+[[ "$(cat "$fileadmin/from-server")" == staging ]]
 
 echo 'Testing an empty docroot and PHP fallback'
 mkdir -p "$work/production/current/fileadmin" fileadmin

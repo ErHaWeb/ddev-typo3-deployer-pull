@@ -22,7 +22,7 @@ ddev add-on get ErHaWeb/ddev-typo3-deployer-pull
 To install a specific release, pass its tag.
 
 ```bash
-ddev add-on get ErHaWeb/ddev-typo3-deployer-pull --version v1.0.0
+ddev add-on get ErHaWeb/ddev-typo3-deployer-pull --version v1.0.1
 ```
 
 Use `--version main` to try the current development branch. Commit the
@@ -45,8 +45,8 @@ until you move it.
   (`helhum/typo3-console` 8 or 9) locally and remotely. Match the local
   database engine and version to the server.
 - The host needs Bash, OpenSSH, rsync and the standard
-  `awk`, `sed`, `tr`, `head`, `tail` and `rm` tools. The server needs rsync
-  and a dump client usable by TYPO3 Console.
+  `awk`, `sed`, `tr`, `head`, `tail`, `cat`, `grep`, `mktemp` and `rm` tools.
+  The server needs rsync and a dump client usable by TYPO3 Console.
 - Add an SSH alias named after the DDEV project. All environments in the
   example use that same SSH account.
 
@@ -116,6 +116,9 @@ ddev pull deployer --skip-files --skip-import   # Fetch and validate a dump with
 ```
 
 The preflight requires rsync and a valid `fileadmin/` even with skip flags.
+It checks the effective OpenSSH settings for the DDEV project name before
+connecting. If the destination and identity settings are all OpenSSH
+defaults, add or correct the matching `Host` entry in `~/.ssh/config`.
 SSH disables forced TTY and remote commands on the alias. The export reads the
 `Default` connection and streams the dump over compressed SSH. Caches,
 sessions, `sys_log`, `sys_http_report` and `sys_file_processedfile` are
@@ -135,6 +138,12 @@ absent upstream. It leaves `_processed_/` and `_temp_/` alone and uses local
 ownership and permission defaults. Run one pull at a time
 per project. The provider handles a single database connection and
 `fileadmin/`, with no push operation or other storage synchronization.
+
+If rsync fails, the provider shows the original error and warns that
+the file mirror may be incomplete. A filename encoding error calls for checking
+the affected names on the deployment host. A missing basis file calls for
+checking whether local files were changed during the incremental transfer.
+After resolving the error, use `--skip-db` to retry the files alone.
 
 ## Platform coverage
 
