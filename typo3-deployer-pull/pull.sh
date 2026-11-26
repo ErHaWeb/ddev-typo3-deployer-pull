@@ -12,18 +12,8 @@ ssh_host=${DDEV_PROJECT:?No DDEV project selected}
 ssh_options=(-T -o RemoteCommand=none)
 dump=.ddev/.downloads/db.sql
 
-# DDEV may capture provider output even in an interactive terminal. Keep the
-# same readable ASCII labels in that case, and never require ANSI colors.
-color_section='' color_success='' color_muted='' color_reset=''
-if [[ -t 1 && -z "${NO_COLOR:-}" && -n "${TERM:-}" && "$TERM" != dumb ]]; then
-    color_section=$'\033[1;36m'
-    color_success=$'\033[32m'
-    color_muted=$'\033[2m'
-    color_reset=$'\033[0m'
-fi
-
 log_section() {
-    printf '\n%s%s%s\n' "$color_section" "$1" "$color_reset"
+    printf '\n%s\n' "$1"
 }
 
 log_step() {
@@ -35,7 +25,7 @@ log_success() {
     if [[ $# -gt 1 ]]; then
         message+=" ($((SECONDS - $2)) s)"
     fi
-    printf '  %s[OK]%s %s\n' "$color_success" "$color_reset" "$message"
+    printf '  [OK] %s\n' "$message"
 }
 
 log_info() {
@@ -43,7 +33,7 @@ log_info() {
 }
 
 log_skip() {
-    printf '  %s[SKIP]%s %s\n' "$color_muted" "$color_reset" "$1"
+    printf '  [SKIP] %s\n' "$1"
 }
 
 # Report the actual SQL file size, not the database server's allocated size.

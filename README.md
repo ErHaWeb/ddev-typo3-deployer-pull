@@ -221,8 +221,8 @@ synchronization sections. `[..]` means
 an operation has started, `[OK]` means it completed successfully and `[SKIP]`
 means it was intentionally omitted. Completed transfers and database operations
 show elapsed time in whole seconds; the export also shows the SQL dump size.
-DDEV's own messages and the original errors remain visible. Colors are optional
-and used only when the provider has a suitable terminal; `NO_COLOR` disables them.
+The provider uses plain text in both terminal sessions and automated logs.
+DDEV's own messages and the original errors remain visible.
 
 ## Troubleshooting
 
