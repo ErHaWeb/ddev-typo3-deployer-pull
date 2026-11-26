@@ -42,7 +42,8 @@ read_deployment() {
     deploy_path=${deploy_path%/}
     [[ "$deploy_path" == /?* ]] || die "No absolute deploy_path for host '$host' in .hosts.yml."
     check_remote_path "$deploy_path"
-    # The deployment metadata is used to validate the effective SSH target.
+    # The hostname is only used for SSH configuration hints; user and port are
+    # compared when explicitly configured.
     [[ "$ssh_hostname$ssh_user$ssh_port" != *[[:space:]]* ]] \
         || die "hostname, remote_user and port of host '$host' must not contain whitespace."
     php_command=${php_command//\{\{deploy_path\}\}/"$deploy_path"}
@@ -70,7 +71,8 @@ explain_ssh_configuration() {
 }
 
 # Keep the project's SSH alias and let OpenSSH resolve all connection settings.
-# Only compare explicitly configured user/port; otherwise OpenSSH owns them.
+# Only compare explicitly configured user/port; hostname spellings can differ
+# (for example, a DNS name in SSH config and an IP address in .hosts.yml).
 check_ssh_configuration() {
     local config key value rest hostname='' user='' port=''
     if ! config=$(ssh -G "${ssh_options[@]}" -- "$ssh_host"); then
@@ -85,7 +87,6 @@ check_ssh_configuration() {
         esac
     done <<< "$config"
     if [[ -z "$hostname" || -z "$user" || -z "$port" ]] \
-        || ! (shopt -s nocasematch; [[ "$hostname" == "$ssh_hostname" ]]) \
         || [[ -n "$ssh_user" && "$user" != "$ssh_user" ]] \
         || [[ -n "$ssh_port" && "$port" != "$ssh_port" ]]; then
         printf '%s\n' "SSH alias '$ssh_host' does not match Deployer host '$host'." \

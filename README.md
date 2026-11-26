@@ -70,7 +70,8 @@ hosts:
 
 It uses these settings of the selected host, with Deployer's defaults:
 
-- `deploy_path` (required) and `hostname` (default: the host name).
+- `deploy_path` (required) and `hostname` (default: the host name, used
+  only for SSH configuration hints).
 - `remote_user` and `port` (default: whatever OpenSSH uses for that
   project alias).
 - `bin/php` (default: `php`). `{{deploy_path}}` is resolved, other
@@ -94,13 +95,17 @@ Host example-typo3
     IdentitiesOnly yes
 ```
 
-The provider uses `ssh -G` to compare the effective hostname and any
-explicitly configured `remote_user` and `port` with the selected Deployer
-host before exporting or mirroring. Hostnames are compared as strings
-(case-insensitively), not by DNS resolution. A mismatch stops the pull;
-there is no direct-connection fallback. Hosts sharing the same SSH target
-can use the same alias with different `deploy_path` values. For different
-SSH targets, use separate DDEV projects with their own existing aliases.
+The provider uses `ssh -G` to read the effective SSH configuration and
+compare any explicitly configured `remote_user` and `port` with the selected
+Deployer host before exporting or mirroring. A user or port mismatch stops
+the pull. Hostnames are not compared or resolved by the provider: the SSH
+alias may use a DNS name while `.hosts.yml` uses an IP address, or vice versa.
+OpenSSH remains responsible for the connection and host-key verification.
+The project alias must point to the intended deployment server; the provider
+does not verify that both hostnames identify the same server. There is no
+direct-connection fallback. Hosts sharing the same SSH target can use the
+same alias with different `deploy_path` values. For different SSH targets,
+use separate DDEV projects with their own existing aliases.
 
 `deploy_path` and the upload directories reach the remote shell unquoted,
 because openrsync drops quotes. They may only contain letters, digits and
@@ -135,7 +140,7 @@ the files step is a no-op.
 ### Migrate from 1.0
 
 - **SSH:** Keep the existing project alias and SSH configuration. The
-  provider now checks that the effective SSH target matches `.hosts.yml`.
+  provider checks explicitly configured user and port against `.hosts.yml`.
 - **PHP:** 1.0 read `set('bin/php', ...)` from `deploy.php`. Move that value
   to `bin/php` in `.hosts.yml`.
 
@@ -171,11 +176,12 @@ ddev pull deployer --skip-files --skip-import   # Fetch and validate a dump with
 
 DDEV runs the preflight before anything else and does not tell it about
 skip flags. So it always requires rsync, a valid host in `.hosts.yml` and
-valid upload destinations. If the SSH configuration does not match the
-selected host, the provider shows the `Host` block above with a placeholder
-for the key. Exit status 255 can indicate an SSH connection error or a
-failed remote command (including a PHP fatal error). Check the original
-error output; for a PHP error, verify the remote `bin/php` in `.hosts.yml`.
+valid upload destinations. If the SSH configuration cannot be read, is
+incomplete, or has a user or port mismatch, the provider shows the `Host`
+block above with a placeholder for the key. Exit status 255 can indicate an
+SSH connection error or a failed remote command (including a PHP fatal error).
+Check the original error output; for a PHP error, verify the remote `bin/php`
+in `.hosts.yml`.
 The PHP version in the local DDEV container does not control the remote
 export. SSH disables a forced TTY and remote commands from `~/.ssh/config`.
 The export reads the `Default` connection and streams the dump over

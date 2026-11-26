@@ -208,7 +208,7 @@ hosts:
   production:
     remote_user: release
     <<: *base
-    hostname: "deployment.example.invalid"
+    hostname: "192.0.2.10"
     deploy_path: "$work/production"
   staging:
     <<: *base
@@ -242,6 +242,9 @@ grep -F 'Pull cancelled' "$work/confirm.log"
 test ! -e "$work/ssh.log"
 test ! -e "$work/typo3.log"
 test -f "$fileadmin/local-only"
+# The fixture SSH alias resolves to a DNS name, while production declares
+# an IP address. Both database and file pulls must use the existing alias.
+echo 'Testing a DNS hostname in SSH config with an IP in .hosts.yml'
 printf 'y\n' | DDEV_NONINTERACTIVE=false "$TEST_DDEV" pull deployer
 check_db production
 [[ "$(cat "$fileadmin/from-server")" == production ]]
@@ -299,9 +302,9 @@ for php_status in 255 1; do
     check_db staging
     [[ "$(cat "$fileadmin/from-server")" == staging ]]
 done
-# Wrong effective targets must stop before any remote transfer or local import.
+# Explicit user or port mismatches must stop before any remote transfer or local import.
 remote_calls_before=$(grep -c '^-T ' "$work/ssh.log")
-for mismatch in TEST_SSH_HOSTNAME=wrong.example.invalid TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
+for mismatch in TEST_SSH_USER=wrong TEST_SSH_PORT=22; do
     expect_failure "SSH alias '$project' does not match Deployer host 'production'" env "$mismatch" "$TEST_DDEV" pull deployer -y
     grep -F "Host $project" "$work/failure.log"
     grep -F 'IdentityFile ~/.ssh/<deployment-key>' "$work/failure.log"
